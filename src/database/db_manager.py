@@ -96,6 +96,9 @@ class DatabaseManager:
                 ('nested_level', 'INTEGER DEFAULT 0'),
                 ('parent_download_id', 'INTEGER'),
                 ('error_message', 'TEXT'),
+                ('download_count', 'INTEGER DEFAULT 1'),
+                ('first_download_time', 'DATETIME'),
+                ('jd_complete_time', 'DATETIME'),
             ]
 
             for column_name, column_type in new_columns:
@@ -103,6 +106,50 @@ class DatabaseManager:
                     cursor.execute(f'ALTER TABLE downloads ADD COLUMN {column_name} {column_type}')
                 except sqlite3.OperationalError:
                     pass  # 欄位已存在
+
+            # download_history 表 - 追蹤每次下載時間
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS download_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tid TEXT NOT NULL,
+                    download_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    filename TEXT,
+                    post_id INTEGER,
+                    FOREIGN KEY (post_id) REFERENCES posts(id)
+                )
+            ''')
+
+            # forum_sections 表 - 論壇版區結構
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS forum_sections (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fid TEXT UNIQUE NOT NULL,
+                    name TEXT NOT NULL,
+                    parent_fid TEXT,
+                    level INTEGER DEFAULT 0,
+                    post_count INTEGER,
+                    last_updated DATETIME,
+                    FOREIGN KEY (parent_fid) REFERENCES forum_sections(fid)
+                )
+            ''')
+
+            # search_results 表 - 搜尋結果暫存
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS search_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    tid TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    author TEXT,
+                    post_date TEXT,
+                    fid TEXT,
+                    forum_name TEXT,
+                    post_url TEXT,
+                    selected BOOLEAN DEFAULT FALSE,
+                    processed BOOLEAN DEFAULT FALSE,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
 
     def post_exists(self, thread_id: str) -> bool:
         """檢查帖子是否已存在 (只是瀏覽過)"""
@@ -528,6 +575,7 @@ class DatabaseManager:
                     d.extracted_at,
                     d.extract_success,
                     d.created_at,
+                    p.thread_id,
                     p.title,
                     p.author,
                     p.forum_section,
@@ -570,3 +618,323 @@ class DatabaseManager:
                 'extract_failed': extract_failed,
                 'pending_extract': pending_extract
             }
+
+    # ========== 下載次數追蹤 ==========
+
+    def has_thanked(self, thread_id: str) -> bool:
+        """檢查帖子是否已感謝過"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT 1 FROM posts WHERE thread_id = ? AND thanks_success = 1
+            ''', (thread_id,))
+            return cursor.fetchone() is not None
+
+    def record_download_attempt(self, thread_id: str, filename: str, post_id: int = None) -> int:
+        """
+        記錄下載嘗試，回傳該 TID 的下載次數
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+
+            # 記錄到 download_history
+            cursor.execute('''
+                INSERT INTO download_history (tid, download_time, filename, post_id)
+                VALUES (?, ?, ?, ?)
+            ''', (thread_id, now, filename, post_id))
+
+            # 計算該 TID 的下載次數
+            cursor.execute('''
+                SELECT COUNT(*) FROM download_history WHERE tid = ?
+            ''', (thread_id,))
+            count = cursor.fetchone()[0]
+
+            return count
+
+    def get_download_count(self, thread_id: str) -> int:
+        """取得該 TID 的下載次數"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT COUNT(*) FROM download_history WHERE tid = ?
+            ''', (thread_id,))
+            return cursor.fetchone()[0]
+
+    def get_download_times(self, thread_id: str) -> List[Dict[str, Any]]:
+        """取得該 TID 的所有下載時間記錄"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, download_time, filename
+                FROM download_history
+                WHERE tid = ?
+                ORDER BY download_time ASC
+            ''', (thread_id,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_repeated_downloads(self, min_count: int = 2) -> List[Dict[str, Any]]:
+        """取得下載次數 >= min_count 的帖子列表"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT
+                    dh.tid,
+                    COUNT(*) as download_count,
+                    MAX(dh.download_time) as last_download,
+                    MIN(dh.download_time) as first_download,
+                    dh.filename,
+                    p.title,
+                    p.post_url
+                FROM download_history dh
+                LEFT JOIN posts p ON dh.tid = p.thread_id
+                GROUP BY dh.tid
+                HAVING download_count >= ?
+                ORDER BY download_count DESC, last_download DESC
+            ''', (min_count,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    # ========== JDownloader 下載完成追蹤 ==========
+
+    def mark_jd_complete(self, download_id: int = None, thread_id: str = None):
+        """標記 JDownloader 下載完成"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+
+            if download_id:
+                cursor.execute('''
+                    UPDATE downloads SET jd_complete_time = ?, download_status = 'completed'
+                    WHERE id = ?
+                ''', (now, download_id))
+            elif thread_id:
+                cursor.execute('''
+                    UPDATE downloads SET jd_complete_time = ?, download_status = 'completed'
+                    WHERE post_id IN (SELECT id FROM posts WHERE thread_id = ?)
+                    AND jd_complete_time IS NULL
+                ''', (now, thread_id))
+
+    def get_pending_jd_downloads(self, run_id: int = None) -> List[Dict[str, Any]]:
+        """取得等待 JD 完成的下載項目"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            query = '''
+                SELECT
+                    d.id, d.link_url, d.jd_package_name, d.archive_filename,
+                    d.sent_to_jd_at, d.jd_complete_time,
+                    p.thread_id, p.title
+                FROM downloads d
+                JOIN posts p ON d.post_id = p.id
+                WHERE d.sent_to_jd_at IS NOT NULL
+                AND d.jd_complete_time IS NULL
+            '''
+            if run_id:
+                query += ' AND d.id IN (SELECT download_id FROM run_downloads WHERE run_id = ?)'
+                cursor.execute(query, (run_id,))
+            else:
+                cursor.execute(query)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def check_all_jd_complete(self, thread_ids: List[str]) -> bool:
+        """檢查指定的 TID 列表是否全部下載完成"""
+        if not thread_ids:
+            return True
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            placeholders = ','.join('?' * len(thread_ids))
+            cursor.execute(f'''
+                SELECT COUNT(*) FROM downloads d
+                JOIN posts p ON d.post_id = p.id
+                WHERE p.thread_id IN ({placeholders})
+                AND d.sent_to_jd_at IS NOT NULL
+                AND d.jd_complete_time IS NULL
+            ''', thread_ids)
+            pending = cursor.fetchone()[0]
+            return pending == 0
+
+    # ========== 版區結構管理 ==========
+
+    def save_forum_section(self, fid: str, name: str, parent_fid: str = None,
+                           level: int = 0, post_count: int = None):
+        """儲存版區資訊"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+            cursor.execute('''
+                INSERT OR REPLACE INTO forum_sections
+                (fid, name, parent_fid, level, post_count, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (fid, name, parent_fid, level, post_count, now))
+
+    def save_forum_sections_batch(self, sections: List[Dict]):
+        """批次儲存版區資訊"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+            for section in sections:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO forum_sections
+                    (fid, name, parent_fid, level, post_count, last_updated)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (
+                    section['fid'],
+                    section['name'],
+                    section.get('parent_fid'),
+                    section.get('level', 0),
+                    section.get('post_count'),
+                    now
+                ))
+
+    def get_all_forum_sections(self) -> List[Dict[str, Any]]:
+        """取得所有版區"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT fid, name, parent_fid, level, post_count, last_updated
+                FROM forum_sections
+                ORDER BY level, name
+            ''')
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_forum_sections_tree(self) -> List[Dict[str, Any]]:
+        """取得版區樹狀結構"""
+        sections = self.get_all_forum_sections()
+
+        # 建立 fid -> section 映射
+        section_map = {s['fid']: {**s, 'children': []} for s in sections}
+
+        # 建立樹狀結構
+        roots = []
+        for section in sections:
+            fid = section['fid']
+            parent_fid = section['parent_fid']
+
+            if parent_fid and parent_fid in section_map:
+                section_map[parent_fid]['children'].append(section_map[fid])
+            else:
+                roots.append(section_map[fid])
+
+        return roots
+
+    def get_forum_section(self, fid: str) -> Optional[Dict[str, Any]]:
+        """取得單一版區"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT fid, name, parent_fid, level, post_count, last_updated
+                FROM forum_sections WHERE fid = ?
+            ''', (fid,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_sections_last_updated(self) -> Optional[str]:
+        """取得版區最後更新時間"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT MAX(last_updated) FROM forum_sections')
+            row = cursor.fetchone()
+            return row[0] if row else None
+
+    def clear_forum_sections(self):
+        """清空版區資料"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM forum_sections')
+
+    # ========== 搜尋結果管理 ==========
+
+    def create_search_session(self) -> str:
+        """建立新的搜尋 session，回傳 session_id"""
+        import uuid
+        return str(uuid.uuid4())[:8]
+
+    def save_search_result(self, session_id: str, tid: str, title: str,
+                           author: str = None, post_date: str = None,
+                           fid: str = None, forum_name: str = None,
+                           post_url: str = None):
+        """儲存搜尋結果"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO search_results
+                (session_id, tid, title, author, post_date, fid, forum_name, post_url)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (session_id, tid, title, author, post_date, fid, forum_name, post_url))
+
+    def save_search_results_batch(self, session_id: str, results: List[Dict]):
+        """批次儲存搜尋結果"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            for r in results:
+                cursor.execute('''
+                    INSERT INTO search_results
+                    (session_id, tid, title, author, post_date, fid, forum_name, post_url)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    session_id,
+                    r['tid'],
+                    r['title'],
+                    r.get('author'),
+                    r.get('post_date'),
+                    r.get('fid'),
+                    r.get('forum_name'),
+                    r.get('post_url')
+                ))
+
+    def get_search_results(self, session_id: str) -> List[Dict[str, Any]]:
+        """取得搜尋結果"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, tid, title, author, post_date, fid, forum_name,
+                       post_url, selected, processed
+                FROM search_results
+                WHERE session_id = ?
+                ORDER BY created_at DESC
+            ''', (session_id,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def update_search_result_selected(self, result_id: int, selected: bool):
+        """更新搜尋結果的選取狀態"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE search_results SET selected = ? WHERE id = ?
+            ''', (selected, result_id))
+
+    def update_search_result_processed(self, result_id: int, processed: bool):
+        """更新搜尋結果的處理狀態"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE search_results SET processed = ? WHERE id = ?
+            ''', (processed, result_id))
+
+    def get_selected_search_results(self, session_id: str) -> List[Dict[str, Any]]:
+        """取得已勾選的搜尋結果"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, tid, title, author, post_date, fid, forum_name,
+                       post_url, selected, processed
+                FROM search_results
+                WHERE session_id = ? AND selected = 1 AND processed = 0
+                ORDER BY created_at
+            ''', (session_id,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def clear_search_results(self, session_id: str = None):
+        """清空搜尋結果"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            if session_id:
+                cursor.execute('DELETE FROM search_results WHERE session_id = ?', (session_id,))
+            else:
+                cursor.execute('DELETE FROM search_results')
+
+    def cleanup_old_search_results(self, days: int = 7):
+        """清理舊的搜尋結果"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+            cursor.execute('DELETE FROM search_results WHERE created_at < ?', (cutoff,))

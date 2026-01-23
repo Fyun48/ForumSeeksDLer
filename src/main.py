@@ -59,12 +59,16 @@ class DLP01:
         # 停止旗標 (用於外部中斷)
         self._stop_requested = False
 
+        # 重新下載已感謝帖子選項
+        self.re_download_thanked = self.config.get('crawler', {}).get('re_download_thanked', False)
+
         # 統計
         self.stats = {
             'posts_found': 0,
             'posts_new': 0,
             'thanks_sent': 0,
-            'links_extracted': 0
+            'links_extracted': 0,
+            'repeated_downloads': 0
         }
 
         # 大檔案清單 (超過限制需確認)
@@ -164,11 +168,19 @@ class DLP01:
     def _process_post(self, post: Dict, dry_run: bool):
         """處理單個帖子"""
         thread_id = post['thread_id']
+        is_redownload = False
 
         # 檢查是否已下載過 (有產生 crawljob 才算)
         if self.db.is_downloaded(thread_id):
-            logger.debug(f"  跳過已下載: {post['title'][:30]}...")
-            return
+            # 如果啟用重新下載已感謝帖子
+            if self.re_download_thanked:
+                is_redownload = True
+                download_count = self.db.get_download_count(thread_id)
+                logger.info(f"  [重新下載] {post['title'][:40]}... (第 {download_count + 1} 次)")
+                self.stats['repeated_downloads'] += 1
+            else:
+                logger.debug(f"  跳過已下載: {post['title'][:30]}...")
+                return
 
         # 檢查檔案大小
         file_size_mb = post.get('file_size_mb', 0)
@@ -180,8 +192,9 @@ class DLP01:
             self.large_files.append(post)
             return
 
-        logger.info(f"  新帖子: {post['title'][:50]}...")
-        self.stats['posts_new'] += 1
+        if not is_redownload:
+            logger.info(f"  新帖子: {post['title'][:50]}...")
+            self.stats['posts_new'] += 1
 
         # 儲存到資料庫
         post_id = self.db.add_post(
@@ -222,7 +235,7 @@ class DLP01:
                     result = self.extractor.extract_from_html(html)
                     if result['links']:
                         # 找到連結，進行下載
-                        self._extract_and_download(post_id, post['title'], html, result)
+                        self._extract_and_download(post_id, post['title'], html, result, thread_id)
                         links_found = True
                         break
                     else:
@@ -255,9 +268,11 @@ class DLP01:
                 time.sleep(2)
                 html = self.client.get_thread_page(post['thread_id'])
                 if html:
-                    self._extract_and_download(post['id'], post['title'], html)
+                    self._extract_and_download(post['id'], post['title'], html,
+                                               thread_id=post['thread_id'])
 
-    def _extract_and_download(self, post_id: int, title: str, html: str, result: Dict = None):
+    def _extract_and_download(self, post_id: int, title: str, html: str,
+                               result: Dict = None, thread_id: str = None):
         """提取連結並送到 JDownloader"""
         if result is None:
             result = self.extractor.extract_from_html(html)
@@ -299,6 +314,13 @@ class DLP01:
             # 使用 folderwatch 方式
             self.jd.create_crawljob(links, title, password)
 
+        # 記錄下載嘗試（用於追蹤重複下載）
+        if thread_id:
+            filename = archive_names[0] if archive_names else title
+            download_count = self.db.record_download_attempt(thread_id, filename, post_id)
+            if download_count > 1:
+                logger.info(f"    [重複下載] 這是第 {download_count} 次下載此帖子")
+
     def _print_summary(self):
         """列印執行摘要"""
         logger.info("\n" + "=" * 50)
@@ -308,6 +330,8 @@ class DLP01:
         logger.info(f"新帖子: {self.stats['posts_new']}")
         logger.info(f"感謝成功: {self.stats['thanks_sent']}")
         logger.info(f"提取連結: {self.stats['links_extracted']}")
+        if self.stats['repeated_downloads'] > 0:
+            logger.info(f"重複下載: {self.stats['repeated_downloads']}")
 
         # 顯示大檔案清單
         if self.large_files:

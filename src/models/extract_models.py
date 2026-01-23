@@ -3,7 +3,8 @@
 """
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
+from datetime import datetime
 
 
 @dataclass
@@ -146,3 +147,44 @@ class ExtractConfig:
                 }
             }
         }
+
+
+@dataclass
+class FailureTracker:
+    """追蹤當次監控的失敗狀態"""
+    file_failures: Dict[str, int] = field(default_factory=dict)  # {檔案路徑: 失敗次數}
+    max_failures: int = 5
+
+    def record_failure(self, filepath: str) -> bool:
+        """
+        記錄失敗，回傳是否已達上限
+
+        Returns:
+            True 如果已達失敗上限（應放棄此檔案）
+        """
+        self.file_failures[filepath] = self.file_failures.get(filepath, 0) + 1
+        return self.file_failures[filepath] >= self.max_failures
+
+    def is_blacklisted(self, filepath: str) -> bool:
+        """檢查是否已放棄（達到失敗上限）"""
+        return self.file_failures.get(filepath, 0) >= self.max_failures
+
+    def get_failure_count(self, filepath: str) -> int:
+        """取得失敗次數"""
+        return self.file_failures.get(filepath, 0)
+
+    def get_blacklisted_files(self) -> List[str]:
+        """取得所有已放棄的檔案"""
+        return [f for f, count in self.file_failures.items() if count >= self.max_failures]
+
+    def reset(self):
+        """重置失敗記錄"""
+        self.file_failures.clear()
+
+    def has_active_files(self) -> bool:
+        """檢查是否還有可嘗試的檔案（非放棄狀態）"""
+        # 如果沒有任何失敗記錄，表示沒有正在處理的檔案
+        if not self.file_failures:
+            return False
+        # 檢查是否所有記錄的檔案都已放棄
+        return any(count < self.max_failures for count in self.file_failures.values())

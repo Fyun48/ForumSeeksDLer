@@ -4,7 +4,8 @@ from .extract_models import (
     FilterResult,
     DuplicateResult,
     ExtractResult,
-    ExtractConfig
+    ExtractConfig,
+    FailureTracker
 )
 
 __all__ = [
@@ -12,5 +13,6 @@ __all__ = [
     'FilterResult',
     'DuplicateResult',
     'ExtractResult',
-    'ExtractConfig'
+    'ExtractConfig',
+    'FailureTracker'
 ]

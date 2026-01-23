@@ -16,7 +16,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 from ..utils.logger import logger
 from ..models.extract_models import (
-    ArchiveInfo, FilterResult, DuplicateResult, ExtractResult, ExtractConfig
+    ArchiveInfo, FilterResult, DuplicateResult, ExtractResult, ExtractConfig, FailureTracker
 )
 
 
@@ -50,6 +50,10 @@ class ExtractSignals(QObject):
     nested_found = pyqtSignal(str, int)   # (檔案名稱, 層級)
     file_skipped = pyqtSignal(str, str)   # (檔案名稱, 原因)
     stats_updated = pyqtSignal(dict)      # (統計資料)
+    # 新增：自動停止相關訊號
+    idle_started = pyqtSignal()           # 進入閒置狀態
+    auto_stopped = pyqtSignal(str)        # 自動停止 (原因)
+    file_blacklisted = pyqtSignal(str, int)  # (檔案名稱, 失敗次數)
 
 
 class ExtractMonitor:
@@ -87,6 +91,15 @@ class ExtractMonitor:
 
         # 訊號 (用於 GUI 整合)
         self.signals = ExtractSignals()
+
+        # 失敗追蹤器 (用於自動停止邏輯)
+        self.failure_tracker = FailureTracker(max_failures=5)
+
+        # 自動停止相關
+        self._idle_timeout = 6  # 閒置超時秒數
+        self._idle_start_time: Optional[datetime] = None
+        self._is_monitoring = False
+        self._stop_requested = False
 
     def update_config(self, config: dict):
         """更新設定"""
@@ -861,6 +874,52 @@ class ExtractMonitor:
 
         return None
 
+    def start_monitoring(self):
+        """開始監控"""
+        self._is_monitoring = True
+        self._stop_requested = False
+        self._idle_start_time = None
+        self.failure_tracker.reset()
+        logger.info("解壓監控已啟動")
+
+    def stop_monitoring(self):
+        """停止監控"""
+        self._stop_requested = True
+        self._is_monitoring = False
+        logger.info("解壓監控已停止")
+
+    def request_stop(self):
+        """請求停止（用於外部請求）"""
+        self._stop_requested = True
+
+    def is_monitoring(self) -> bool:
+        """是否正在監控"""
+        return self._is_monitoring
+
+    def _check_idle_timeout(self) -> bool:
+        """
+        檢查是否閒置超時
+
+        Returns:
+            True 如果已超時應該停止
+        """
+        if self._idle_start_time is None:
+            return False
+
+        elapsed = (datetime.now() - self._idle_start_time).total_seconds()
+        return elapsed >= self._idle_timeout
+
+    def _enter_idle_state(self):
+        """進入閒置狀態"""
+        if self._idle_start_time is None:
+            self._idle_start_time = datetime.now()
+            self.signals.idle_started.emit()
+            logger.info("進入閒置狀態，等待新檔案...")
+
+    def _exit_idle_state(self):
+        """離開閒置狀態"""
+        self._idle_start_time = None
+
     def run_monitor(self, interval: int = 60, delete_after: bool = True):
         """持續監控模式"""
         logger.info(f"開始監控下載目錄: {self.download_dir}")
@@ -876,3 +935,126 @@ class ExtractMonitor:
                 logger.error(f"監控處理錯誤: {e}")
 
             time.sleep(interval)
+
+    def run_monitor_with_auto_stop(self, interval: int = 5, delete_after: bool = True,
+                                    db_manager=None) -> dict:
+        """
+        帶自動停止的監控模式
+
+        Args:
+            interval: 檢查間隔秒數
+            delete_after: 解壓後是否刪除原檔
+            db_manager: 資料庫管理器
+
+        Returns:
+            統計結果
+        """
+        self.start_monitoring()
+
+        stats = {
+            'total_processed': 0,
+            'total_success': 0,
+            'total_failed': 0,
+            'blacklisted_files': [],
+            'stop_reason': None
+        }
+
+        logger.info(f"開始監控下載目錄: {self.download_dir}")
+        logger.info(f"解壓目錄: {self.extract_dir}")
+        logger.info(f"檢查間隔: {interval} 秒, 閒置超時: {self._idle_timeout} 秒")
+
+        while self._is_monitoring and not self._stop_requested:
+            try:
+                # 找出待處理的壓縮檔（排除已放棄的）
+                archives = self._find_processable_archives()
+
+                if not archives:
+                    # 沒有待處理檔案，進入/維持閒置狀態
+                    self._enter_idle_state()
+
+                    # 檢查是否閒置超時
+                    if self._check_idle_timeout():
+                        stats['stop_reason'] = '閒置超時'
+                        logger.info(f"閒置超過 {self._idle_timeout} 秒，自動停止監控")
+                        self.signals.auto_stopped.emit(stats['stop_reason'])
+                        break
+                else:
+                    # 有檔案待處理，離開閒置狀態
+                    self._exit_idle_state()
+
+                    # 處理每個壓縮檔
+                    for archive in archives:
+                        if self._stop_requested:
+                            break
+
+                        # 檢查是否已放棄
+                        if self.failure_tracker.is_blacklisted(str(archive)):
+                            continue
+
+                        logger.info(f"處理壓縮檔: {archive.name}")
+                        result = self.process_archive(archive, db_manager=db_manager)
+
+                        # 標記為已處理
+                        self.processed_files.add(str(archive))
+                        stats['total_processed'] += 1
+
+                        if result.success:
+                            stats['total_success'] += 1
+                            self._exit_idle_state()
+                        else:
+                            stats['total_failed'] += 1
+                            # 記錄失敗
+                            is_blacklisted = self.failure_tracker.record_failure(str(archive))
+                            if is_blacklisted:
+                                stats['blacklisted_files'].append(archive.name)
+                                self.signals.file_blacklisted.emit(
+                                    archive.name,
+                                    self.failure_tracker.get_failure_count(str(archive))
+                                )
+                                logger.warning(f"檔案已達失敗上限，放棄處理: {archive.name}")
+
+                time.sleep(interval)
+
+            except Exception as e:
+                logger.error(f"監控處理錯誤: {e}")
+                time.sleep(interval)
+
+        self._is_monitoring = False
+        stats['blacklisted_files'] = self.failure_tracker.get_blacklisted_files()
+
+        if self._stop_requested and stats['stop_reason'] is None:
+            stats['stop_reason'] = '使用者停止'
+
+        logger.info(f"監控結束: 處理 {stats['total_processed']} 個, "
+                   f"成功 {stats['total_success']} 個, 失敗 {stats['total_failed']} 個")
+
+        return stats
+
+    def _find_processable_archives(self) -> List[Path]:
+        """找出可處理的壓縮檔（排除已處理和已放棄的）"""
+        archives = []
+
+        for pattern in self.ARCHIVE_PATTERNS:
+            for filepath in self.download_dir.glob(pattern):
+                # 跳過分卷的非第一卷
+                name = filepath.name.lower()
+                if '.part' in name and not (name.endswith('.part01.rar') or
+                                            name.endswith('.part1.rar') or
+                                            name.endswith('.part001.rar')):
+                    continue
+
+                # 跳過已處理的
+                if str(filepath) in self.processed_files:
+                    continue
+
+                # 跳過已放棄的
+                if self.failure_tracker.is_blacklisted(str(filepath)):
+                    continue
+
+                # 檢查是否還在下載中
+                if self._is_downloading(filepath):
+                    continue
+
+                archives.append(filepath)
+
+        return archives

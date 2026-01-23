@@ -36,6 +36,17 @@ scraper:
   pages_per_section: 1
   posts_per_section: 20
 
+# 爬蟲設定
+crawler:
+  re_download_thanked: false  # 是否重新下載已感謝過的帖子
+
+# 監控設定
+monitor:
+  auto_stop:
+    enabled: true
+    idle_timeout: 6  # 閒置超時秒數
+    max_failures: 5  # 同一檔案最大失敗次數
+
 extract:
   nested:
     enabled: true

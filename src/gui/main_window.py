@@ -6,7 +6,7 @@ import sys
 import os
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -15,15 +15,19 @@ from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QProgressBar, QStatusBar, QMenuBar, QMenu,
     QSplitter, QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
     QDialog, QDialogButtonBox, QInputDialog, QTreeWidget, QTreeWidgetItem,
-    QScrollArea
+    QScrollArea, QSystemTrayIcon
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QAction, QFont, QTextCursor
+from PyQt6.QtGui import QAction, QFont, QTextCursor, QIcon
 
 import yaml
 
 from .extract_settings_widget import ExtractSettingsWidget
 from .extract_history_widget import ExtractHistoryWidget
+from .notifications import NotificationManager
+from .download_history_widget import DownloadTimesDialog
+from .section_search_manager_widget import SectionSearchManagerWidget
+from .search_download_worker import SearchDownloadWorker
 
 
 class LogHandler:
@@ -45,10 +49,12 @@ class CrawlerWorker(QThread):
     finished_signal = pyqtSignal(dict)
     progress_signal = pyqtSignal(int, int)  # current, total
 
-    def __init__(self, config_path: str, dry_run: bool = False):
+    def __init__(self, config_path: str, dry_run: bool = False,
+                 re_download_thanked: bool = False):
         super().__init__()
         self.config_path = config_path
         self.dry_run = dry_run
+        self.re_download_thanked = re_download_thanked
         self.is_running = True
         self.dlp = None  # 保存 DLP01 實例以便停止
 
@@ -73,6 +79,8 @@ class CrawlerWorker(QThread):
             logger.addHandler(handler)
 
             self.dlp = DLP01(config_path=self.config_path)
+            # 設定重新下載已感謝帖子選項
+            self.dlp.re_download_thanked = self.re_download_thanked
             self.dlp.run(dry_run=self.dry_run)
 
             self.finished_signal.emit(self.dlp.stats)
@@ -94,12 +102,15 @@ class ExtractWorker(QThread):
     """解壓監控工作執行緒"""
     log_signal = pyqtSignal(str)
     status_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(dict)  # 監控結束時發送統計結果
+    auto_stopped_signal = pyqtSignal(str)  # 自動停止時發送原因
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, use_auto_stop: bool = True):
         super().__init__()
         self.config = config
         self.is_running = True
         self.monitor = None
+        self.use_auto_stop = use_auto_stop
 
     def run(self):
         try:
@@ -147,6 +158,7 @@ class ExtractWorker(QThread):
                 self.log_signal.emit(f"已設定 JDownloader 路徑: {jd_path}")
 
             # 載入密碼
+            db = None
             try:
                 db = DatabaseManager()
                 passwords = db.get_all_passwords()
@@ -164,32 +176,53 @@ class ExtractWorker(QThread):
             except Exception as e:
                 self.log_signal.emit(f"載入密碼失敗: {e}")
 
-            # 持續監控
-            interval = self.config.get('extract_interval', 60)
-            self.status_signal.emit("監控中")
+            # 使用自動停止模式或持續監控模式
+            if self.use_auto_stop:
+                self.status_signal.emit("監控中 (自動停止)")
+                interval = self.config.get('extract_interval', 5)
 
-            while self.is_running:
-                try:
-                    processed = self.monitor.process_archives(delete_after=True)
-                    if processed > 0:
-                        self.log_signal.emit(f"已處理 {processed} 個壓縮檔")
-                except Exception as e:
-                    self.log_signal.emit(f"處理錯誤: {e}")
+                # 使用帶自動停止的監控模式
+                stats = self.monitor.run_monitor_with_auto_stop(
+                    interval=interval,
+                    delete_after=True,
+                    db_manager=db
+                )
 
-                # 分段等待，以便能夠及時停止
-                for _ in range(interval):
-                    if not self.is_running:
-                        break
-                    self.msleep(1000)
+                self.finished_signal.emit(stats)
+                if stats.get('stop_reason'):
+                    self.auto_stopped_signal.emit(stats['stop_reason'])
+                self.status_signal.emit("已停止")
+            else:
+                # 持續監控模式
+                interval = self.config.get('extract_interval', 60)
+                self.status_signal.emit("監控中")
 
-            self.status_signal.emit("已停止")
+                while self.is_running:
+                    try:
+                        processed = self.monitor.process_archives(delete_after=True, db_manager=db)
+                        if processed > 0:
+                            self.log_signal.emit(f"已處理 {processed} 個壓縮檔")
+                    except Exception as e:
+                        self.log_signal.emit(f"處理錯誤: {e}")
+
+                    # 分段等待，以便能夠及時停止
+                    for _ in range(interval):
+                        if not self.is_running:
+                            break
+                        self.msleep(1000)
+
+                self.status_signal.emit("已停止")
+                self.finished_signal.emit({'stop_reason': '使用者停止'})
 
         except Exception as e:
             self.log_signal.emit(f"監控錯誤: {str(e)}")
             self.status_signal.emit("錯誤")
+            self.finished_signal.emit({'error': str(e)})
 
     def stop(self):
         self.is_running = False
+        if self.monitor:
+            self.monitor.request_stop()
 
 
 class MainWindow(QMainWindow):
@@ -197,6 +230,14 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+
+        # 設定視窗屬性 - 確保可拖曳、縮放、關閉
+        self.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowMinimizeButtonHint |
+            Qt.WindowType.WindowMaximizeButtonHint |
+            Qt.WindowType.WindowCloseButtonHint
+        )
 
         # 初始化設定檔管理器
         from ..utils.profile_manager import ProfileManager
@@ -209,10 +250,23 @@ class MainWindow(QMainWindow):
 
         self.crawler_worker: Optional[CrawlerWorker] = None
         self.extract_worker: Optional[ExtractWorker] = None
+        self.search_download_worker: Optional[SearchDownloadWorker] = None
+
+        # 初始化通知管理器
+        self.notification_manager = NotificationManager("DLP01", self)
+
+        # 初始化 JD 狀態輪詢器
+        self.jd_poller = None
+
+        # 追蹤當次爬取的連結數量
+        self._current_crawl_links: List[Dict] = []
 
         self._init_ui()
         self._load_settings_to_ui()
         self._update_window_title()
+
+        # 設定通知管理器的狀態列
+        self.notification_manager.set_statusbar(self.statusBar())
 
     def _load_config(self) -> dict:
         """載入設定檔"""
@@ -288,19 +342,29 @@ class MainWindow(QMainWindow):
         # 分頁 2: 路徑設定
         self.tabs.addTab(self._create_paths_tab(), "路徑設定")
 
-        # 分頁 3: 版區設定
-        self.tabs.addTab(self._create_sections_tab(), "版區設定")
+        # 分頁 3: 版區搜尋管理 (整合版區管理和搜尋)
+        self.section_search_manager_widget = SectionSearchManagerWidget(
+            config=self.config,
+            config_path=self.config_path
+        )
+        self.section_search_manager_widget.settings_changed.connect(self._on_section_settings_changed)
+        self.section_search_manager_widget.export_to_group_requested.connect(self._on_export_to_section_group)
+        self.section_search_manager_widget.download_requested.connect(self._on_search_download_requested)
+        self.tabs.addTab(self.section_search_manager_widget, "版區搜尋管理")
 
-        # 分頁 4: 下載歷史
+        # 分頁 4: 版區群組 (原有的群組管理)
+        self.tabs.addTab(self._create_sections_tab(), "版區群組")
+
+        # 分頁 5: 下載歷史
         self.tabs.addTab(self._create_history_tab(), "下載歷史")
 
-        # 分頁 5: 解壓記錄
+        # 分頁 6: 解壓記錄
         self.tabs.addTab(self._create_extract_history_tab(), "解壓記錄")
 
-        # 分頁 6: 解壓縮設定
+        # 分頁 7: 解壓縮設定
         self.tabs.addTab(self._create_extract_settings_tab(), "解壓縮設定")
 
-        # 分頁 7: 進階設定
+        # 分頁 8: 進階設定
         self.tabs.addTab(self._create_advanced_tab(), "進階設定")
 
         # 狀態列
@@ -365,6 +429,10 @@ class MainWindow(QMainWindow):
 
         self.chk_dry_run = QCheckBox("試執行模式 (不實際感謝/下載)")
         crawler_layout.addWidget(self.chk_dry_run)
+
+        self.chk_redownload_thanked = QCheckBox("已感謝帖子仍嘗試下載")
+        self.chk_redownload_thanked.setToolTip("勾選後會重新下載曾經感謝過的帖子連結")
+        crawler_layout.addWidget(self.chk_redownload_thanked)
 
         self.crawler_status = QLabel("狀態: 閒置")
         crawler_layout.addWidget(self.crawler_status)
@@ -495,6 +563,24 @@ class MainWindow(QMainWindow):
         self.chk_auto_start_jd = QCheckBox("開始爬取時自動啟動 JDownloader (如果未執行)")
         self.chk_auto_start_jd.setChecked(True)
         programs_layout.addWidget(self.chk_auto_start_jd, 3, 0, 1, 3)
+
+        # SMG 主程式
+        programs_layout.addWidget(QLabel("SMG 主程式:"), 4, 0)
+        self.txt_smg_exe = QLineEdit()
+        self.txt_smg_exe.setPlaceholderText("SimpleMediaGrabber.exe 路徑 (用於某些雲端空間下載)")
+        programs_layout.addWidget(self.txt_smg_exe, 4, 1)
+        btn_smg_exe = QPushButton("瀏覽...")
+        btn_smg_exe.clicked.connect(lambda: self._browse_file(self.txt_smg_exe, "SMG (*.exe)"))
+        programs_layout.addWidget(btn_smg_exe, 4, 2)
+
+        # SMG 下載目錄
+        programs_layout.addWidget(QLabel("SMG 下載目錄:"), 5, 0)
+        self.txt_smg_download_dir = QLineEdit()
+        self.txt_smg_download_dir.setPlaceholderText("SMG 下載檔案儲存目錄 (可選)")
+        programs_layout.addWidget(self.txt_smg_download_dir, 5, 1)
+        btn_smg_dir = QPushButton("瀏覽...")
+        btn_smg_dir.clicked.connect(lambda: self._browse_dir(self.txt_smg_download_dir))
+        programs_layout.addWidget(btn_smg_dir, 5, 2)
 
         layout.addWidget(programs_group)
 
@@ -671,24 +757,28 @@ class MainWindow(QMainWindow):
         history_layout = QVBoxLayout(history_group)
 
         self.history_table = QTableWidget()
-        self.history_table.setColumnCount(8)
+        self.history_table.setColumnCount(9)
         self.history_table.setHorizontalHeaderLabels([
-            "標題", "類型", "密碼", "送JD時間", "解壓時間", "解壓狀態", "版區", "建立時間"
+            "TID", "標題", "下載次數", "類型", "密碼", "送JD時間", "解壓狀態", "版區", "建立時間"
         ])
 
         # 設定欄寬
         header = self.history_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)  # 標題自動延伸
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # TID
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)  # 標題自動延伸
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # 下載次數
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # 類型
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)  # 密碼
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)  # 送JD時間
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)  # 解壓狀態
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)  # 版區
+        header.setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents)  # 建立時間
 
         self.history_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.history_table.setAlternatingRowColors(True)
+        self.history_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        # 點擊下載次數欄位時顯示詳細記錄
+        self.history_table.cellClicked.connect(self._on_history_cell_clicked)
 
         history_layout.addWidget(self.history_table)
 
@@ -921,6 +1011,11 @@ class MainWindow(QMainWindow):
         self.txt_jd_folderwatch.setText(jd.get('folderwatch_path', ''))
         self.chk_auto_start_jd.setChecked(jd.get('auto_start', True))
 
+        # SMG 設定
+        smg = self.config.get('smg', {})
+        self.txt_smg_exe.setText(smg.get('exe_path', ''))
+        self.txt_smg_download_dir.setText(smg.get('download_dir', ''))
+
         # 版區設定 (群組化)
         self._load_sections_to_tree()
 
@@ -976,6 +1071,12 @@ class MainWindow(QMainWindow):
         self.config['jdownloader']['exe_path'] = self.txt_jd_exe.text()
         self.config['jdownloader']['folderwatch_path'] = self.txt_jd_folderwatch.text()
         self.config['jdownloader']['auto_start'] = self.chk_auto_start_jd.isChecked()
+
+        # SMG 設定
+        if 'smg' not in self.config:
+            self.config['smg'] = {}
+        self.config['smg']['exe_path'] = self.txt_smg_exe.text()
+        self.config['smg']['download_dir'] = self.txt_smg_download_dir.text()
 
         self._save_config()
 
@@ -1215,6 +1316,120 @@ class MainWindow(QMainWindow):
     def _on_section_item_changed(self, item, column):
         """當樹狀項目變更時"""
         pass  # 目前用按鈕控制，不用這個
+
+    def _on_section_settings_changed(self):
+        """版區管理設定變更時 - 自動儲存到檔案"""
+        self._save_config()
+        self.statusBar().showMessage("版區設定已儲存", 3000)
+
+    def _on_export_to_section_group(self, sections: list):
+        """將版區管理的選擇匯出到版區群組"""
+        if not sections:
+            return
+
+        # 詢問要建立的群組名稱
+        group_name, ok = QInputDialog.getText(
+            self, "匯出到版區群組",
+            f"將匯出 {len(sections)} 個版區\n請輸入群組名稱:",
+            text="匯入的版區"
+        )
+
+        if not ok or not group_name:
+            return
+
+        # 建立群組項目
+        group_item = QTreeWidgetItem(self.tree_sections)
+        group_item.setText(0, group_name)
+        group_item.setText(1, "")
+        group_item.setText(2, "✓")
+        group_item.setData(0, Qt.ItemDataRole.UserRole, {'type': 'group', 'enabled': True})
+        group_item.setExpanded(True)
+
+        font = group_item.font(0)
+        font.setBold(True)
+        group_item.setFont(0, font)
+
+        # 加入版區
+        for section in sections:
+            section_item = QTreeWidgetItem(group_item)
+            section_item.setText(0, f"  {section['name']}")
+            section_item.setText(1, str(section['fid']))
+            section_item.setText(2, "✓")
+            section_item.setData(0, Qt.ItemDataRole.UserRole, {
+                'type': 'section',
+                'fid': section['fid'],
+                'enabled': True
+            })
+
+        # 切換到版區群組分頁
+        self.tabs.setCurrentIndex(3)  # 版區群組的索引
+
+        QMessageBox.information(self, "完成", f"已匯出 {len(sections)} 個版區到群組「{group_name}」")
+        self.statusBar().showMessage(f"已匯出 {len(sections)} 個版區，請記得儲存設定", 5000)
+
+    def _on_search_download_requested(self, selected_posts: list):
+        """版區搜尋請求批次下載"""
+        if not selected_posts:
+            QMessageBox.warning(self, "提示", "沒有選取任何帖子")
+            return
+
+        # 確認下載
+        reply = QMessageBox.question(
+            self, "確認下載",
+            f"將下載 {len(selected_posts)} 個帖子，是否繼續？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # 建立批次下載工作執行緒
+        self.search_download_worker = SearchDownloadWorker(
+            selected_posts=selected_posts,
+            config_path=str(self.config_path),
+            config=self.config
+        )
+
+        # 連接訊號
+        self.search_download_worker.log_signal.connect(self._append_log)
+        self.search_download_worker.progress_signal.connect(self._on_search_download_progress)
+        self.search_download_worker.finished_signal.connect(self._on_search_download_finished)
+        self.search_download_worker.error_signal.connect(self._on_search_download_error)
+
+        # 開始執行
+        self.search_download_worker.start()
+
+        # 切換到主控制台顯示日誌
+        self.tabs.setCurrentIndex(0)
+        self._append_log(f"開始批次下載 {len(selected_posts)} 個帖子...")
+
+    def _on_search_download_progress(self, current: int, total: int, title: str):
+        """批次下載進度更新"""
+        self.statusBar().showMessage(f"下載進度: {current}/{total} - {title}")
+
+    def _on_search_download_finished(self, stats: dict):
+        """批次下載完成"""
+        self.statusBar().showMessage("批次下載完成", 5000)
+
+        # 顯示統計
+        msg = (
+            f"批次下載完成!\n\n"
+            f"成功: {stats.get('success', 0)}\n"
+            f"失敗: {stats.get('failed', 0)}\n"
+            f"跳過: {stats.get('skipped', 0)}\n"
+            f"提取連結數: {stats.get('links_extracted', 0)}"
+        )
+        QMessageBox.information(self, "完成", msg)
+
+        # 清理
+        self.search_download_worker = None
+
+    def _on_search_download_error(self, error: str):
+        """批次下載錯誤"""
+        self.statusBar().showMessage(f"下載錯誤: {error}", 5000)
+        QMessageBox.warning(self, "錯誤", f"批次下載失敗: {error}")
+        self.search_download_worker = None
 
     def _add_section_group(self):
         """新增版區群組"""
@@ -1798,7 +2013,8 @@ class MainWindow(QMainWindow):
 
         self.crawler_worker = CrawlerWorker(
             str(self.config_path),
-            dry_run=self.chk_dry_run.isChecked()
+            dry_run=self.chk_dry_run.isChecked(),
+            re_download_thanked=self.chk_redownload_thanked.isChecked()
         )
         self.crawler_worker.log_signal.connect(self._append_log)
         self.crawler_worker.finished_signal.connect(self._crawler_finished)
@@ -1827,6 +2043,118 @@ class MainWindow(QMainWindow):
             self.lbl_thanks_sent.setText(f"感謝成功: {stats.get('thanks_sent', 0)}")
             self.lbl_links_extracted.setText(f"提取連結: {stats.get('links_extracted', 0)}")
 
+            # 顯示通知
+            total_links = stats.get('links_extracted', 0)
+            new_links = stats.get('posts_new', 0)
+            self.notification_manager.notify_crawl_complete(total_links, new_links)
+
+            # 如果有提取連結，啟動 JD 狀態輪詢器
+            if total_links > 0:
+                self._start_jd_polling()
+
+    def _start_jd_polling(self):
+        """啟動 JDownloader 狀態輪詢"""
+        try:
+            from ..downloader.jd_status_poller import JDStatusPoller
+            from ..database.db_manager import DatabaseManager
+
+            # 取得 JD 路徑
+            jd_exe = self.config.get('jdownloader', {}).get('exe_path', '')
+            if not jd_exe:
+                self._append_log("[JD監控] 未設定 JDownloader 路徑，無法監控下載狀態")
+                return
+
+            from pathlib import Path
+            jd_exe_path = Path(jd_exe)
+
+            # 嘗試找到正確的 JD 路徑 (支援 Portable 版本)
+            jd_path = None
+            possible_paths = [
+                jd_exe_path.parent,  # 普通安裝
+                jd_exe_path.parent.parent.parent,  # Portable: App/JDownloader2/JDownloader2.exe
+            ]
+
+            for p in possible_paths:
+                cfg_path = p / 'cfg'
+                if not cfg_path.exists():
+                    cfg_path = p / 'App' / 'JDownloader2' / 'cfg'
+                if cfg_path.exists():
+                    jd_path = str(p)
+                    self._append_log(f"[JD監控] 找到 JD cfg 路徑: {cfg_path}")
+                    break
+
+            if not jd_path:
+                jd_path = str(jd_exe_path.parent)
+                self._append_log(f"[JD監控] 使用預設路徑: {jd_path}")
+
+            # 建立或重用輪詢器
+            if self.jd_poller is None:
+                self.jd_poller = JDStatusPoller(jd_path, self)
+                self.jd_poller.file_complete.connect(self._on_jd_file_complete)
+                self.jd_poller.all_complete.connect(self._on_jd_all_complete)
+                self.jd_poller.progress_updated.connect(self._on_jd_progress)
+                self._append_log(f"[JD監控] 建立輪詢器，JD 路徑: {jd_path}")
+            else:
+                # 重置現有輪詢器
+                self.jd_poller.reset()
+                self._append_log("[JD監控] 重置現有輪詢器")
+
+            # 設定預期的檔案列表 (從資料庫取得最近送到 JD 的記錄)
+            db = DatabaseManager()
+            pending = db.get_pending_jd_downloads()
+            self._append_log(f"[JD監控] 資料庫查詢到 {len(pending)} 個待下載項目")
+
+            if pending:
+                expected_files = []
+                for record in pending:
+                    pkg_name = record.get('jd_package_name') or record.get('title')
+                    expected_files.append({
+                        'tid': record.get('thread_id'),
+                        'package_name': pkg_name,
+                        'filename': record.get('archive_filename'),
+                        'link_url': record.get('link_url')
+                    })
+                    self._append_log(f"[JD監控] 預期: {pkg_name[:50]}...")
+
+                self.jd_poller.set_expected_files(expected_files)
+                self.jd_poller.start_polling(interval=15000)  # 每 15 秒檢查一次
+                self._append_log(f"[JD監控] 開始輪詢 ({len(expected_files)} 個檔案，間隔 15 秒)")
+            else:
+                self._append_log("[JD監控] 沒有待下載的檔案，跳過監控")
+                # 沒有待下載項目，直接啟動解壓監控
+                if self.extract_worker is None or not self.extract_worker.isRunning():
+                    self._append_log("[JD監控] 直接啟動解壓監控...")
+                    QTimer.singleShot(2000, self._start_extract_monitor)
+
+        except Exception as e:
+            self._append_log(f"[JD監控] 啟動失敗: {e}")
+            import traceback
+            self._append_log(traceback.format_exc())
+
+    def _on_jd_file_complete(self, package_name: str, filename: str):
+        """單一檔案下載完成"""
+        self._append_log(f"[JD] 下載完成: {package_name}")
+
+    def _on_jd_progress(self, completed: int, total: int):
+        """JD 下載進度更新"""
+        self.crawler_status.setText(f"狀態: JD 下載中 ({completed}/{total})")
+
+    def _on_jd_all_complete(self, count: int):
+        """所有 JD 下載完成 - 自動啟動解壓監控"""
+        self._append_log(f"[JD] 全部 {count} 個檔案下載完成！")
+        self.crawler_status.setText("狀態: JD 下載完成")
+        self.notification_manager.show_toast(
+            "下載完成",
+            f"JDownloader 已完成 {count} 個檔案下載，即將啟動解壓監控",
+            notification_type="success"
+        )
+
+        # 自動啟動解壓監控
+        if self.extract_worker is None or not self.extract_worker.isRunning():
+            self._append_log("自動啟動解壓監控...")
+            # 使用 QTimer 延遲啟動，確保 JD 完全處理完畢
+            QTimer.singleShot(3000, self._start_extract_monitor)
+
     def _start_extract_monitor(self):
         """開始解壓監控"""
         self.btn_start_extract.setEnabled(False)
@@ -1836,12 +2164,17 @@ class MainWindow(QMainWindow):
         config = self.config.copy()
         config['extract_interval'] = self.spin_extract_interval.value()
 
-        self.extract_worker = ExtractWorker(config)
+        # 使用自動停止模式
+        self.extract_worker = ExtractWorker(config, use_auto_stop=True)
         self.extract_worker.log_signal.connect(self._append_log)
         self.extract_worker.status_signal.connect(
             lambda s: self.extract_status.setText(f"狀態: {s}")
         )
+        self.extract_worker.finished_signal.connect(self._extract_monitor_finished)
+        self.extract_worker.auto_stopped_signal.connect(self._on_extract_auto_stopped)
         self.extract_worker.start()
+
+        self.notification_manager.notify_extract_started()
 
     def _stop_extract_monitor(self):
         """停止解壓監控"""
@@ -1853,6 +2186,25 @@ class MainWindow(QMainWindow):
         self.btn_start_extract.setEnabled(True)
         self.btn_stop_extract.setEnabled(False)
         self.extract_status.setText("狀態: 已停止")
+
+    def _extract_monitor_finished(self, stats: dict):
+        """解壓監控完成"""
+        self.btn_start_extract.setEnabled(True)
+        self.btn_stop_extract.setEnabled(False)
+
+        success = stats.get('total_success', 0)
+        failed = stats.get('total_failed', 0)
+        self.notification_manager.notify_extract_complete(success, failed)
+
+        # 顯示放棄的檔案
+        blacklisted = stats.get('blacklisted_files', [])
+        if blacklisted:
+            self._append_log(f"以下檔案因失敗次數過多而放棄: {', '.join(blacklisted)}")
+
+    def _on_extract_auto_stopped(self, reason: str):
+        """解壓監控自動停止"""
+        self.notification_manager.notify_extract_auto_stopped(reason)
+        self.extract_worker = None
 
     def _append_log(self, message: str):
         """添加日誌"""
@@ -1877,6 +2229,7 @@ class MainWindow(QMainWindow):
         """重新整理下載歷史"""
         try:
             from ..database.db_manager import DatabaseManager
+            from PyQt6.QtGui import QColor, QBrush
             db = DatabaseManager()
 
             # 更新統計資訊
@@ -1893,22 +2246,44 @@ class MainWindow(QMainWindow):
             self.history_table.setRowCount(len(history))
 
             for row, record in enumerate(history):
+                tid = record.get('thread_id', '')
+                title = record.get('title', '')
+
+                # 取得下載次數
+                download_count = db.get_download_count(tid) if tid else 0
+
+                # TID
+                self.history_table.setItem(row, 0, QTableWidgetItem(tid))
+
                 # 標題
-                self.history_table.setItem(row, 0, QTableWidgetItem(record.get('title', '')))
+                self.history_table.setItem(row, 1, QTableWidgetItem(title))
+
+                # 下載次數 - 可點擊，帶醒目顯示
+                count_item = QTableWidgetItem(f"[{download_count}]")
+                count_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                count_item.setData(Qt.ItemDataRole.UserRole, tid)  # 儲存 TID 供點擊使用
+
+                # 根據次數設定背景色
+                if download_count >= 3:
+                    count_item.setBackground(QBrush(QColor(255, 100, 100)))  # 紅色
+                    count_item.setFont(QFont("", -1, QFont.Weight.Bold))
+                elif download_count >= 2:
+                    count_item.setBackground(QBrush(QColor(255, 200, 100)))  # 橘色
+
+                self.history_table.setItem(row, 2, count_item)
+
                 # 類型
-                self.history_table.setItem(row, 1, QTableWidgetItem(record.get('link_type', '')))
+                self.history_table.setItem(row, 3, QTableWidgetItem(record.get('link_type', '')))
+
                 # 密碼
-                self.history_table.setItem(row, 2, QTableWidgetItem(record.get('password', '')))
+                self.history_table.setItem(row, 4, QTableWidgetItem(record.get('password', '')))
+
                 # 送JD時間
                 sent_time = record.get('sent_to_jd_at', '')
                 if sent_time:
                     sent_time = sent_time[:16].replace('T', ' ')  # 格式化時間
-                self.history_table.setItem(row, 3, QTableWidgetItem(sent_time))
-                # 解壓時間
-                extract_time = record.get('extracted_at', '')
-                if extract_time:
-                    extract_time = extract_time[:16].replace('T', ' ')
-                self.history_table.setItem(row, 4, QTableWidgetItem(extract_time))
+                self.history_table.setItem(row, 5, QTableWidgetItem(sent_time))
+
                 # 解壓狀態
                 extract_success = record.get('extract_success')
                 if extract_success is None:
@@ -1917,19 +2292,51 @@ class MainWindow(QMainWindow):
                     status = "成功"
                 else:
                     status = "失敗"
-                self.history_table.setItem(row, 5, QTableWidgetItem(status))
+                self.history_table.setItem(row, 6, QTableWidgetItem(status))
+
                 # 版區
-                self.history_table.setItem(row, 6, QTableWidgetItem(record.get('forum_section', '')))
+                self.history_table.setItem(row, 7, QTableWidgetItem(record.get('forum_section', '')))
+
                 # 建立時間
                 created = record.get('created_at', '')
                 if created:
                     created = created[:16].replace('T', ' ')
-                self.history_table.setItem(row, 7, QTableWidgetItem(created))
+                self.history_table.setItem(row, 8, QTableWidgetItem(created))
 
             self.statusBar().showMessage(f"已載入 {len(history)} 筆記錄", 3000)
 
         except Exception as e:
             QMessageBox.warning(self, "錯誤", f"載入歷史記錄失敗: {e}")
+
+    def _on_history_cell_clicked(self, row: int, column: int):
+        """處理歷史表格點擊 - 下載次數欄位彈出詳細記錄"""
+        # 只處理下載次數欄位 (column 2)
+        if column != 2:
+            return
+
+        item = self.history_table.item(row, 2)
+        if not item:
+            return
+
+        tid = item.data(Qt.ItemDataRole.UserRole)
+        if not tid:
+            return
+
+        # 取得標題
+        title_item = self.history_table.item(row, 1)
+        title = title_item.text() if title_item else ""
+
+        # 取得下載時間記錄並顯示對話框
+        try:
+            from ..database.db_manager import DatabaseManager
+            db = DatabaseManager()
+            times = db.get_download_times(tid)
+
+            if times:
+                dialog = DownloadTimesDialog(tid, title, times, self)
+                dialog.exec()
+        except Exception as e:
+            self._append_log(f"載入下載時間失敗: {e}")
 
     def _cleanup_old_records(self):
         """清理舊記錄"""

@@ -28,9 +28,12 @@ class ForumStructureScraper:
         self.base_url = client.base_url
         self._visited_fids: Set[str] = set()
 
-    def scrape_all_sections(self) -> List[Dict]:
+    def scrape_all_sections(self, deep_scrape: bool = True) -> List[Dict]:
         """
         爬取完整版區結構
+
+        Args:
+            deep_scrape: 是否深入爬取各版區頁面的子版區
 
         Returns:
             樹狀結構的版區列表
@@ -48,11 +51,103 @@ class ForumStructureScraper:
         sections = self._parse_forum_index(html)
         logger.info(f"從首頁解析到 {len(sections)} 個主分類")
 
+        # 深入爬取各版區的子版區
+        if deep_scrape:
+            self._deep_scrape_subforums(sections)
+
         # 計算總版區數
         total_count = self._count_sections(sections)
         logger.info(f"共解析到 {total_count} 個版區")
 
         return sections
+
+    def _deep_scrape_subforums(self, sections: List[Dict], depth: int = 0):
+        """
+        深入爬取各版區頁面的子版區
+
+        Args:
+            sections: 版區列表
+            depth: 當前深度
+        """
+        if depth >= self.max_depth:
+            return
+
+        for section in sections:
+            fid = section['fid']
+
+            # 跳過分類 ID
+            if fid.startswith('gid_') or fid.startswith('cat_'):
+                # 遞迴處理子項目
+                if section.get('children'):
+                    self._deep_scrape_subforums(section['children'], depth)
+                continue
+
+            # 爬取此版區頁面尋找子版區
+            subforums = self._scrape_forum_page_subforums(fid)
+            if subforums:
+                # 合併到現有子版區
+                existing_fids = {c['fid'] for c in section.get('children', [])}
+                for subforum in subforums:
+                    if subforum['fid'] not in existing_fids:
+                        subforum['parent_fid'] = fid
+                        subforum['level'] = section.get('level', 1) + 1
+                        if 'children' not in section:
+                            section['children'] = []
+                        section['children'].append(subforum)
+                        logger.info(f"  發現子版區: {subforum['name']} (FID: {subforum['fid']})")
+
+            # 遞迴處理子版區
+            if section.get('children'):
+                self._deep_scrape_subforums(section['children'], depth + 1)
+
+    def _scrape_forum_page_subforums(self, fid: str) -> List[Dict]:
+        """
+        爬取單個版區頁面，找出其子版區
+
+        結構：
+        <div id="subforum_XX" class="bm_c">
+            <div class="forum-icon">
+                <a href="forum.php?mod=forumdisplay&fid=YY">
+            <p class="mb-0"><a href="...fid=YY">子版區名稱</a></p>
+        </div>
+        """
+        try:
+            url = f"{self.base_url}/forum.php?mod=forumdisplay&fid={fid}"
+            resp = self.client.get(url)
+            if not resp:
+                return []
+
+            soup = BeautifulSoup(resp.text, 'lxml')
+
+            # 找子版區區塊
+            subforum_div = soup.find('div', id=re.compile(f'^subforum_{fid}$'))
+            if not subforum_div:
+                return []
+
+            subforums = []
+
+            # 找所有子版區連結
+            for p_tag in subforum_div.find_all('p', class_='mb-0'):
+                link = p_tag.find('a', href=re.compile(r'mod=forumdisplay.*fid=\d+'))
+                if link:
+                    sub_fid = self._extract_fid(link.get('href', ''))
+                    if sub_fid and sub_fid not in self._visited_fids:
+                        self._visited_fids.add(sub_fid)
+                        name = link.get_text(strip=True)
+                        name = self._clean_forum_name(name)
+                        subforums.append({
+                            'fid': sub_fid,
+                            'name': name,
+                            'parent_fid': fid,
+                            'level': 2,
+                            'children': []
+                        })
+
+            return subforums
+
+        except Exception as e:
+            logger.debug(f"爬取版區 {fid} 子版區失敗: {e}")
+            return []
 
     def _count_sections(self, sections: List[Dict]) -> int:
         """計算版區總數"""

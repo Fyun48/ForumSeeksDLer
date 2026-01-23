@@ -1,15 +1,110 @@
 """
 論壇帖子搜尋器
 支援論壇搜尋 API 和本地篩選兩種模式
+支援多關鍵字搜尋：空格=AND, |=OR, "..."=精確詞組
 """
 import re
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from urllib.parse import quote
 from bs4 import BeautifulSoup
 
 from .forum_client import ForumClient
 from .post_parser import PostParser
 from ..utils.logger import logger
+
+
+class KeywordParser:
+    """
+    關鍵字解析器
+
+    支援語法：
+    - 空格分隔 = AND（都要符合）
+    - | 分隔 = OR（任一符合）
+    - "..." = 精確詞組
+    - 混合使用: "ROSE Vol" | 玫瑰  (精確詞組 OR 玫瑰)
+    """
+
+    @staticmethod
+    def parse(keyword: str) -> Tuple[str, List[Dict]]:
+        """
+        解析關鍵字字串
+
+        Returns:
+            (api_keyword, conditions)
+            - api_keyword: 用於 API 搜尋的主關鍵字
+            - conditions: 條件列表，每個條件是 {'type': 'and'|'or', 'terms': [...]}
+        """
+        if not keyword:
+            return '', []
+
+        keyword = keyword.strip()
+
+        # 檢查是否有 OR 運算子
+        if '|' in keyword:
+            # OR 模式
+            parts = [p.strip() for p in keyword.split('|') if p.strip()]
+            all_terms = []
+            for part in parts:
+                terms = KeywordParser._parse_single_group(part)
+                all_terms.extend(terms)
+
+            # 使用第一個詞作為 API 搜尋關鍵字
+            api_keyword = all_terms[0] if all_terms else keyword
+            return api_keyword, [{'type': 'or', 'terms': all_terms}]
+        else:
+            # AND 模式（空格分隔）
+            terms = KeywordParser._parse_single_group(keyword)
+            api_keyword = terms[0] if terms else keyword
+            return api_keyword, [{'type': 'and', 'terms': terms}]
+
+    @staticmethod
+    def _parse_single_group(text: str) -> List[str]:
+        """解析單一群組（處理引號內的精確詞組）"""
+        terms = []
+        # 先提取引號內的詞組
+        quoted_pattern = r'"([^"]+)"'
+        quoted_matches = re.findall(quoted_pattern, text)
+        terms.extend(quoted_matches)
+
+        # 移除已提取的引號詞組
+        remaining = re.sub(quoted_pattern, ' ', text)
+
+        # 分割剩餘的詞
+        for word in remaining.split():
+            word = word.strip()
+            if word:
+                terms.append(word)
+
+        return terms
+
+    @staticmethod
+    def matches(title: str, conditions: List[Dict]) -> bool:
+        """
+        檢查標題是否符合條件
+
+        Args:
+            title: 帖子標題
+            conditions: 條件列表
+        """
+        if not conditions:
+            return True
+
+        title_lower = title.lower()
+
+        for condition in conditions:
+            cond_type = condition['type']
+            terms = condition['terms']
+
+            if cond_type == 'and':
+                # AND: 所有詞都要符合
+                if all(term.lower() in title_lower for term in terms):
+                    return True
+            elif cond_type == 'or':
+                # OR: 任一詞符合即可
+                if any(term.lower() in title_lower for term in terms):
+                    return True
+
+        return False
 
 
 class ForumSearcher:
@@ -30,8 +125,13 @@ class ForumSearcher:
         """
         搜尋帖子
 
+        支援多關鍵字語法：
+        - 空格 = AND（都要符合）: "ROSE JAV" 找包含 ROSE 且包含 JAV 的帖子
+        - | = OR（任一符合）: "ROSE|玫瑰" 找包含 ROSE 或玫瑰的帖子
+        - "..." = 精確詞組: '"ROSE Vol"' 找包含完整 "ROSE Vol" 的帖子
+
         Args:
-            keyword: 搜尋關鍵字
+            keyword: 搜尋關鍵字（支援 AND/OR 語法）
             fids: 要搜尋的版區 ID 列表
             max_pages: 每個版區最多爬幾頁 (本地模式用)
             use_api_first: 是否優先使用論壇搜尋 API
@@ -43,7 +143,12 @@ class ForumSearcher:
         if not keyword or not fids:
             return []
 
-        logger.info(f"搜尋關鍵字: {keyword}, 版區: {fids}")
+        # 解析關鍵字
+        api_keyword, conditions = KeywordParser.parse(keyword)
+        logger.info(f"搜尋關鍵字: {keyword}")
+        logger.info(f"  API 關鍵字: {api_keyword}")
+        logger.info(f"  條件: {conditions}")
+        logger.info(f"  版區: {fids}")
 
         all_results = []
 
@@ -54,19 +159,31 @@ class ForumSearcher:
 
             results = []
 
-            # 優先使用論壇搜尋 API
+            # 優先使用論壇搜尋 API（使用解析後的主關鍵字）
             if use_api_first:
-                results = self._search_via_api(keyword, fid)
+                results = self._search_via_api(api_keyword, fid)
 
             # 如果 API 沒有結果，改用本地爬取篩選
             if not results:
                 logger.info(f"版區 {fid} API 搜尋無結果，改用本地篩選")
-                results = self._search_via_scraping(keyword, fid, max_pages)
+                results = self._search_via_scraping(api_keyword, fid, max_pages)
 
             all_results.extend(results)
 
         # 合併去重
         merged = self._merge_results(all_results)
+
+        # 套用多關鍵字條件過濾
+        if conditions and len(conditions[0].get('terms', [])) > 1:
+            before_filter = len(merged)
+            merged = [
+                post for post in merged
+                if KeywordParser.matches(post.get('title', ''), conditions)
+            ]
+            after_filter = len(merged)
+            if before_filter != after_filter:
+                logger.info(f"多關鍵字過濾: {before_filter} -> {after_filter} 筆")
+
         logger.info(f"搜尋完成，共找到 {len(merged)} 筆結果")
 
         return merged

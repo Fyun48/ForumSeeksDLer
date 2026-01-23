@@ -262,7 +262,14 @@ class SectionSearchManagerWidget(QWidget):
 
         search_layout.addWidget(QLabel("搜尋關鍵字:"))
         self.txt_keyword = QLineEdit()
-        self.txt_keyword.setPlaceholderText("輸入搜尋關鍵字...")
+        self.txt_keyword.setPlaceholderText("輸入關鍵字 (空格=AND, |=OR, \"...\"=精確詞組)")
+        self.txt_keyword.setToolTip(
+            "搜尋語法：\n"
+            "• 空格分隔 = AND（都要符合）: ROSE JAV\n"
+            "• | 分隔 = OR（任一符合）: ROSE|玫瑰\n"
+            "• 雙引號 = 精確詞組: \"ROSE Vol\"\n"
+            "• 混合使用: \"ROSE Vol\"|玫瑰"
+        )
         self.txt_keyword.returnPressed.connect(self._do_search)
         search_layout.addWidget(self.txt_keyword)
 
@@ -407,7 +414,7 @@ class SectionSearchManagerWidget(QWidget):
 
     def _load_categories(self):
         """載入分類列表"""
-        categories = self.config.get('forum', {}).get('categories', ['我的最愛', '常用', '其他'])
+        categories = self.config.get('forum', {}).get('categories', ['我的最愛', '常用', '其它'])
 
         self.combo_category.blockSignals(True)
         self.combo_category.clear()

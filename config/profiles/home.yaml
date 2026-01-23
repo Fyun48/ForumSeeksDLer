@@ -1,0 +1,38 @@
+auth:
+  cookie_file: E:\dp01\config\profiles\home_cookies.json
+database:
+  retention_days: 7
+extract_interval: 60
+forum:
+  base_url: https://fastzone.org
+  target_sections:
+  - fid: '77'
+    name: 成人短片專用區
+  - fid: '74'
+    name: AV 成人無碼區
+  - fid: '170'
+    name: AV 西方交流區
+  title_filters:
+  - MG@JD
+  - Transfer@HTTP
+  - Gofile@HTTP
+  - MEGA@IE
+  - MEGA@
+  - MEGA @
+  - MEGA @ 網頁下載
+  - '@MEGA'
+  - MEGA@白馬
+jdownloader:
+  auto_start: true
+  exe_path: F:\常用免安裝工軟體\JDownloaderPortable\azofreeware.com\JDownloader2Portable.exe
+  folderwatch_path: F:\常用免安裝工軟體\JDownloaderPortable\azofreeware.com\App\JDownloader2\folderwatch
+paths:
+  download_dir: F:/DL TEMP
+  extract_dir: F:/exzact
+  winrar_path: C:\Program Files\WinRAR\WinRAR.exe
+scraper:
+  delay_between_requests: 2
+  delay_between_thanks: 5
+  max_file_size_mb: 4096
+  pages_per_section: 1
+  posts_per_section: 15

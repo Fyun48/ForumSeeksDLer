@@ -1,0 +1,33 @@
+auth:
+  cookie_file: C:\Users\Jimmy\Documents\code\dlp01\config\profiles\帳號3_cookies.json
+database:
+  retention_days: 30
+extract_interval: 60
+forum:
+  base_url: https://fastzone.org
+  target_sections:
+  - fid: '77'
+    name: 成人短片專用區
+  - fid: '74'
+    name: AV 成人無碼區
+  - fid: '170'
+    name: AV 西方交流區
+  title_filters:
+  - MG@JD
+  - Transfer@HTTP
+  - Gofile@HTTP
+  - MEGA@IE
+jdownloader:
+  auto_start: true
+  exe_path: ''
+  folderwatch_path: ''
+paths:
+  download_dir: c:\dl\dl\
+  extract_dir: c:\dl\rar\
+  winrar_path: ''
+scraper:
+  delay_between_requests: 2
+  delay_between_thanks: 5
+  max_file_size_mb: 2048
+  pages_per_section: 1
+  posts_per_section: 15

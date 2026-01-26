@@ -99,6 +99,7 @@ class DatabaseManager:
                 ('download_count', 'INTEGER DEFAULT 1'),
                 ('first_download_time', 'DATETIME'),
                 ('jd_complete_time', 'DATETIME'),
+                ('jd_actual_filename', 'TEXT'),  # JDownloader 實際下載的檔名
             ]
 
             for column_name, column_type in new_columns:
@@ -151,6 +152,45 @@ class DatabaseManager:
                 )
             ''')
 
+            # web_downloads 表 - 網頁下載記錄（無法用 JDownloader 的連結）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS web_downloads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thread_id TEXT NOT NULL,
+                    title TEXT,
+                    post_url TEXT,
+                    keyword TEXT,
+                    download_url TEXT,
+                    password TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    downloaded_at DATETIME
+                )
+            ''')
+
+            # 為 web_downloads 增加欄位（遷移現有資料庫）
+            web_download_columns = [
+                ('downloaded_at', 'DATETIME'),
+            ]
+            for column_name, column_type in web_download_columns:
+                try:
+                    cursor.execute(f'ALTER TABLE web_downloads ADD COLUMN {column_name} {column_type}')
+                except sqlite3.OperationalError:
+                    pass  # 欄位已存在
+
+            # smg_downloads 表 - SMG 下載記錄
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS smg_downloads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thread_id TEXT NOT NULL,
+                    title TEXT,
+                    post_url TEXT,
+                    keyword TEXT,
+                    smg_code TEXT,
+                    password TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
     def post_exists(self, thread_id: str) -> bool:
         """檢查帖子是否已存在 (只是瀏覽過)"""
         with self.get_connection() as conn:
@@ -159,15 +199,39 @@ class DatabaseManager:
             return cursor.fetchone() is not None
 
     def is_downloaded(self, thread_id: str) -> bool:
-        """檢查帖子是否已下載過 (有產生 crawljob 並送到 JDownloader)"""
+        """
+        檢查帖子是否已下載過
+        檢查範圍：JDownloader 下載、網頁下載、SMG 下載
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
+
+            # 檢查 JDownloader 下載
             cursor.execute('''
                 SELECT 1 FROM posts p
                 JOIN downloads d ON p.id = d.post_id
                 WHERE p.thread_id = ? AND d.sent_to_jd_at IS NOT NULL
             ''', (thread_id,))
-            return cursor.fetchone() is not None
+            if cursor.fetchone():
+                return True
+
+            # 檢查網頁下載
+            cursor.execute('''
+                SELECT 1 FROM web_downloads
+                WHERE thread_id = ?
+            ''', (thread_id,))
+            if cursor.fetchone():
+                return True
+
+            # 檢查 SMG 下載
+            cursor.execute('''
+                SELECT 1 FROM smg_downloads
+                WHERE thread_id = ?
+            ''', (thread_id,))
+            if cursor.fetchone():
+                return True
+
+            return False
 
     def add_post(self, thread_id: str, title: str, author: str,
                  forum_section: str, post_url: str, host_type: str = None) -> int:
@@ -268,21 +332,50 @@ class DatabaseManager:
             return row[0] if row else None
 
     def get_passwords_with_titles(self) -> List[Dict[str, str]]:
-        """取得所有密碼與對應的標題和壓縮檔名稱 (用於匹配檔案名稱)"""
+        """取得所有密碼與對應的標題和壓縮檔名稱 (用於匹配檔案名稱)
+
+        同時查詢 downloads 表和 web_downloads 表的密碼
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            results = []
+
+            # 從 downloads 表查詢（JDownloader 下載）
             cursor.execute('''
-                SELECT DISTINCT d.password, d.jd_package_name, p.title, d.archive_filename
+                SELECT DISTINCT d.password, d.jd_package_name, p.title,
+                       d.archive_filename, d.jd_actual_filename
                 FROM downloads d
                 JOIN posts p ON d.post_id = p.id
                 WHERE d.password IS NOT NULL AND d.password != ''
             ''')
-            return [{
-                'password': row[0],
-                'package_name': row[1],
-                'title': row[2],
-                'archive_filename': row[3]
-            } for row in cursor.fetchall()]
+            for row in cursor.fetchall():
+                results.append({
+                    'password': row[0],
+                    'package_name': row[1],
+                    'title': row[2],
+                    'archive_filename': row[3],
+                    'jd_actual_filename': row[4],
+                    'source': 'jdownloader'
+                })
+
+            # 從 web_downloads 表查詢（網頁下載/特殊關鍵字）
+            cursor.execute('''
+                SELECT DISTINCT password, title, keyword
+                FROM web_downloads
+                WHERE password IS NOT NULL AND password != ''
+            ''')
+            for row in cursor.fetchall():
+                results.append({
+                    'password': row[0],
+                    'package_name': row[1],  # 用 title 當作 package_name
+                    'title': row[1],
+                    'archive_filename': None,
+                    'jd_actual_filename': None,
+                    'source': 'web_download',
+                    'keyword': row[2]
+                })
+
+            return results
 
     def mark_extracted(self, download_id: int = None, package_name: str = None,
                        success: bool = True):
@@ -575,6 +668,8 @@ class DatabaseManager:
                     d.extracted_at,
                     d.extract_success,
                     d.created_at,
+                    d.archive_filename,
+                    d.jd_actual_filename,
                     p.thread_id,
                     p.title,
                     p.author,
@@ -713,6 +808,64 @@ class DatabaseManager:
                     WHERE post_id IN (SELECT id FROM posts WHERE thread_id = ?)
                     AND jd_complete_time IS NULL
                 ''', (now, thread_id))
+
+    def update_jd_actual_filename(self, package_name: str, actual_filename: str) -> int:
+        """
+        更新 JDownloader 實際下載的檔名
+
+        Args:
+            package_name: JDownloader 套件名稱 (crawljob 標題)
+            actual_filename: JDownloader 實際下載的檔案名稱
+
+        Returns:
+            更新的記錄數量
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+
+            # 使用套件名稱匹配，更新實際檔名並標記完成
+            # 只更新尚未設定實際檔名的記錄
+            cursor.execute('''
+                UPDATE downloads
+                SET jd_actual_filename = ?,
+                    jd_complete_time = COALESCE(jd_complete_time, ?),
+                    download_status = 'completed'
+                WHERE jd_package_name LIKE ?
+                AND (jd_actual_filename IS NULL OR jd_actual_filename = '')
+            ''', (actual_filename, now, f'%{package_name}%'))
+
+            return cursor.rowcount
+
+    def update_archive_filename_if_empty(self, package_name: str, filename: str) -> int:
+        """
+        更新 archive_filename（僅在原本為空時更新）
+
+        用於從 JD linkgrabber 取得預估檔名時更新，
+        不會覆蓋已經從帖子解析出來的檔名。
+
+        Args:
+            package_name: JDownloader 套件名稱 (crawljob 標題)
+            filename: JD 解析出的檔名
+
+        Returns:
+            更新的記錄數量
+        """
+        if not filename:
+            return 0
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+
+            # 使用套件名稱匹配，只在 archive_filename 為空時更新
+            cursor.execute('''
+                UPDATE downloads
+                SET archive_filename = ?
+                WHERE jd_package_name LIKE ?
+                AND (archive_filename IS NULL OR archive_filename = '')
+            ''', (filename, f'%{package_name}%'))
+
+            return cursor.rowcount
 
     def get_pending_jd_downloads(self, run_id: int = None) -> List[Dict[str, Any]]:
         """取得等待 JD 完成的下載項目"""
@@ -938,3 +1091,206 @@ class DatabaseManager:
             cursor = conn.cursor()
             cutoff = (datetime.now() - timedelta(days=days)).isoformat()
             cursor.execute('DELETE FROM search_results WHERE created_at < ?', (cutoff,))
+
+    # ========== 網頁下載記錄管理 ==========
+
+    def add_web_download(self, thread_id: str, title: str, post_url: str,
+                         keyword: str, download_url: str, password: str = None) -> int:
+        """新增網頁下載記錄"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO web_downloads
+                (thread_id, title, post_url, keyword, download_url, password)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (thread_id, title, post_url, keyword, download_url, password))
+            return cursor.lastrowid
+
+    def get_web_downloads(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+        """取得網頁下載記錄"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, thread_id, title, post_url, keyword,
+                       download_url, password, created_at, downloaded_at
+                FROM web_downloads
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+            ''', (limit, offset))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_web_downloads_count(self) -> int:
+        """取得網頁下載記錄數量"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT COUNT(*) FROM web_downloads')
+            return cursor.fetchone()[0]
+
+    def get_all_web_download_urls(self) -> List[str]:
+        """取得所有網頁下載連結（用於一次全開）"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT download_url FROM web_downloads
+                WHERE download_url IS NOT NULL AND download_url != ''
+                ORDER BY created_at DESC
+            ''')
+            return [row[0] for row in cursor.fetchall()]
+
+    def clear_web_downloads(self):
+        """清空網頁下載記錄"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM web_downloads')
+
+    def delete_web_download(self, download_id: int):
+        """刪除單筆網頁下載記錄"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM web_downloads WHERE id = ?', (download_id,))
+
+    def web_download_exists(self, thread_id: str, download_url: str) -> bool:
+        """檢查網頁下載記錄是否已存在（避免重複）"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT 1 FROM web_downloads
+                WHERE thread_id = ? AND download_url = ?
+            ''', (thread_id, download_url))
+            return cursor.fetchone() is not None
+
+    def mark_web_download_complete(self, thread_id: str, record_history: bool = True) -> int:
+        """
+        標記網頁下載為已完成
+
+        Args:
+            thread_id: 帖子 ID
+            record_history: 是否記錄到 download_history 表
+
+        Returns:
+            更新的記錄數量
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            now = datetime.now().isoformat()
+
+            # 更新 downloaded_at
+            cursor.execute('''
+                UPDATE web_downloads
+                SET downloaded_at = ?
+                WHERE thread_id = ? AND downloaded_at IS NULL
+            ''', (now, thread_id))
+            updated_count = cursor.rowcount
+
+            # 取得該 thread_id 的資料用於記錄歷史
+            if record_history and updated_count > 0:
+                cursor.execute('''
+                    SELECT title FROM web_downloads
+                    WHERE thread_id = ?
+                    LIMIT 1
+                ''', (thread_id,))
+                row = cursor.fetchone()
+                if row:
+                    title = row[0] or ''
+                    # 記錄到 download_history（用於追蹤下載次數）
+                    cursor.execute('''
+                        INSERT INTO download_history (tid, download_time, filename, post_id)
+                        VALUES (?, ?, ?, NULL)
+                    ''', (thread_id, now, f'[網頁下載] {title}'))
+
+            return updated_count
+
+    def get_web_download_by_thread(self, thread_id: str) -> List[Dict[str, Any]]:
+        """根據 thread_id 取得網頁下載記錄"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, thread_id, title, post_url, keyword,
+                       download_url, password, created_at, downloaded_at
+                FROM web_downloads
+                WHERE thread_id = ?
+                ORDER BY created_at DESC
+            ''', (thread_id,))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def is_web_download_complete(self, thread_id: str) -> bool:
+        """檢查網頁下載是否已標記為完成"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT 1 FROM web_downloads
+                WHERE thread_id = ? AND downloaded_at IS NOT NULL
+            ''', (thread_id,))
+            return cursor.fetchone() is not None
+
+    def get_web_download_passwords(self) -> List[Dict[str, str]]:
+        """取得網頁下載的所有密碼（用於密碼匹配）"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT DISTINCT password, title, keyword, thread_id
+                FROM web_downloads
+                WHERE password IS NOT NULL AND password != ''
+            ''')
+            return [{
+                'password': row[0],
+                'title': row[1],
+                'keyword': row[2],
+                'thread_id': row[3]
+            } for row in cursor.fetchall()]
+
+    # ========== SMG 下載記錄管理 ==========
+
+    def add_smg_download(self, thread_id: str, title: str, post_url: str,
+                         keyword: str, smg_code: str, password: str = None) -> int:
+        """新增 SMG 下載記錄"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO smg_downloads
+                (thread_id, title, post_url, keyword, smg_code, password)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (thread_id, title, post_url, keyword, smg_code, password))
+            return cursor.lastrowid
+
+    def get_smg_downloads(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
+        """取得 SMG 下載記錄"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT id, thread_id, title, post_url, keyword,
+                       smg_code, password, created_at
+                FROM smg_downloads
+                ORDER BY created_at DESC
+                LIMIT ? OFFSET ?
+            ''', (limit, offset))
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_smg_downloads_count(self) -> int:
+        """取得 SMG 下載記錄數量"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT COUNT(*) FROM smg_downloads')
+            return cursor.fetchone()[0]
+
+    def smg_download_exists(self, thread_id: str) -> bool:
+        """檢查 SMG 下載記錄是否已存在（避免重複）"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT 1 FROM smg_downloads
+                WHERE thread_id = ?
+            ''', (thread_id,))
+            return cursor.fetchone() is not None
+
+    def clear_smg_downloads(self):
+        """清空 SMG 下載記錄"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM smg_downloads')
+
+    def delete_smg_download(self, download_id: int):
+        """刪除單筆 SMG 下載記錄"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM smg_downloads WHERE id = ?', (download_id,))

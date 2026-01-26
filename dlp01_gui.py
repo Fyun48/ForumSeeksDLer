@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
+from src.gui.styles import apply_nord_theme
 
 
 def main():
@@ -36,6 +37,9 @@ def main():
 
     # 設定樣式
     app.setStyle("Fusion")
+
+    # 套用 Nord 深色主題
+    apply_nord_theme(app)
 
     # 載入主視窗
     from src.gui.main_window import MainWindow

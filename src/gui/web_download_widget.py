@@ -18,7 +18,7 @@ from PyQt6.QtGui import QFont, QColor, QCursor
 
 from ..database.db_manager import DatabaseManager
 from ..utils.logger import logger
-from .styles import HINT_LABEL
+from .styles import HINT_LABEL, NordColors
 
 
 class WebDownloadWidget(QWidget):
@@ -207,7 +207,7 @@ class WebDownloadWidget(QWidget):
             # 關鍵字 (column 2)
             keyword = record.get('keyword', '') or ''
             keyword_item = QTableWidgetItem(keyword)
-            keyword_item.setForeground(QColor(0, 100, 180))
+            keyword_item.setForeground(QColor(*NordColors.FROST_1))  # 冰藍
             self.table.setItem(row, 2, keyword_item)
 
             # 下載連結 (column 3)
@@ -230,14 +230,14 @@ class WebDownloadWidget(QWidget):
             password = record.get('password', '') or '-'
             password_item = QTableWidgetItem(password)
             if password and password != '-':
-                password_item.setForeground(QColor(180, 0, 0))
+                password_item.setForeground(QColor(*NordColors.AURORA_RED))  # 紅色
             self.table.setItem(row, 4, password_item)
 
             # 狀態 (column 5)
             downloaded_at = record.get('downloaded_at')
             if downloaded_at:
                 status_item = QTableWidgetItem("已下載")
-                status_item.setForeground(QColor(0, 128, 0))  # 綠色
+                status_item.setForeground(QColor(*NordColors.AURORA_GREEN))  # 綠色
                 try:
                     dt = datetime.fromisoformat(downloaded_at)
                     status_item.setToolTip(f"下載時間: {dt.strftime('%Y-%m-%d %H:%M')}")
@@ -245,7 +245,7 @@ class WebDownloadWidget(QWidget):
                     status_item.setToolTip(f"下載時間: {downloaded_at}")
             else:
                 status_item = QTableWidgetItem("未下載")
-                status_item.setForeground(QColor(180, 180, 180))  # 灰色
+                status_item.setForeground(QColor(*NordColors.POLAR_NIGHT_3))  # 灰色
             self.table.setItem(row, 5, status_item)
 
             # 時間 (column 6)

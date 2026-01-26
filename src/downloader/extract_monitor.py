@@ -123,8 +123,9 @@ class ExtractMonitor:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
 
             if result.returncode != 0:
-                # 可能需要密碼，嘗試使用已知密碼
-                for pwd in self.passwords[:5]:  # 只嘗試前 5 個密碼
+                # 可能需要密碼，優先使用檔名匹配的密碼
+                matched_passwords = self._find_passwords_for_archive(archive_path)
+                for pwd in matched_passwords:
                     cmd = [str(unrar_path), 'lb', f'-p{pwd}', str(archive_path)]
                     result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
                     if result.returncode == 0:
@@ -293,8 +294,9 @@ class ExtractMonitor:
         dest_size = dest_file.stat().st_size
 
         if src_size == dest_size:
-            # 大小相同，視為相同檔案，跳過
-            src_file.unlink()
+            # 大小相同，視為相同檔案，跳過並刪除來源檔
+            # 使用重試機制處理檔案被佔用的情況
+            self._safe_delete(src_file)
             self.signals.file_skipped.emit(src_file.name, "大小相同，已跳過")
             return 'skipped'
         else:
@@ -302,6 +304,29 @@ class ExtractMonitor:
             new_dest = self.get_unique_filename(dest_file)
             shutil.move(str(src_file), str(new_dest))
             return 'renamed'
+
+    def _safe_delete(self, file_path: Path, max_retries: int = 5, delay: float = 1.0):
+        """
+        安全刪除檔案，包含重試機制
+
+        Args:
+            file_path: 要刪除的檔案路徑
+            max_retries: 最大重試次數
+            delay: 重試間隔秒數
+        """
+        for attempt in range(max_retries):
+            try:
+                file_path.unlink()
+                return
+            except PermissionError:
+                if attempt < max_retries - 1:
+                    logger.debug(f"刪除檔案被拒，{delay} 秒後重試 ({attempt + 1}/{max_retries}): {file_path.name}")
+                    time.sleep(delay)
+                else:
+                    # 最後一次嘗試失敗，記錄警告但不拋出異常
+                    logger.warning(f"無法刪除檔案 (已重試 {max_retries} 次): {file_path}")
+            except Exception as e:
+                logger.warning(f"刪除檔案失敗: {file_path} - {e}")
 
     def get_unique_filename(self, file_path: Path) -> Path:
         """產生不重複的檔名: file.mp4 → file(1).mp4 → file(2).mp4"""
@@ -401,40 +426,112 @@ class ExtractMonitor:
             base_name = self._get_clean_archive_name(archive_path)
             parent_dir = archive_path.parent
 
-            # 刪除所有分卷
+            deleted = []
+
+            # 方法 1: 使用 glob 尋找分卷檔案
+            # 注意: glob 對特殊字元（如 [ ] ）敏感，需要跳脫
+            escaped_base = base_name.replace('[', '[[]').replace(']', '[]]')
+
             patterns = [
-                f"{base_name}.rar",
-                f"{base_name}.part*.rar",
-                f"{base_name}.r??",
-                f"{base_name}.zip",
-                f"{base_name}.7z",
+                f"{escaped_base}.rar",
+                f"{escaped_base}.part*.rar",
+                f"{escaped_base}.r[0-9][0-9]",
+                f"{escaped_base}.zip",
+                f"{escaped_base}.7z",
             ]
 
-            deleted = []
             for pattern in patterns:
-                for f in parent_dir.glob(pattern):
-                    if self.config.delete_permanent:
-                        # 永久刪除
-                        f.unlink()
-                    else:
-                        # 移到資源回收桶 (需要 send2trash 套件)
-                        try:
-                            import send2trash
-                            send2trash.send2trash(str(f))
-                        except ImportError:
-                            # 沒有 send2trash，直接刪除
-                            f.unlink()
-                    deleted.append(f.name)
+                try:
+                    for f in parent_dir.glob(pattern):
+                        self._delete_single_file(f)
+                        deleted.append(f.name)
+                except Exception as e:
+                    logger.debug(f"glob 模式 {pattern} 失敗: {e}")
+
+            # 方法 2: 直接列出目錄，用字串比對找分卷檔案
+            # 這是備用方案，處理 glob 無法匹配的情況
+            base_name_lower = base_name.lower()
+            try:
+                for f in parent_dir.iterdir():
+                    if not f.is_file():
+                        continue
+
+                    f_name_lower = f.name.lower()
+                    f_stem = f.stem.lower()
+
+                    # 檢查是否為相關分卷檔案
+                    # 移除 .partXX 後綴來比對
+                    clean_stem = re.sub(r'\.part\d+$', '', f_stem)
+
+                    if clean_stem == base_name_lower:
+                        # 確認是壓縮檔
+                        if f.suffix.lower() in ['.rar', '.zip', '.7z'] or \
+                           re.match(r'\.r\d{2}$', f.suffix.lower()):
+                            if f.name not in deleted:
+                                self._delete_single_file(f)
+                                deleted.append(f.name)
+            except Exception as e:
+                logger.debug(f"備用刪除方法失敗: {e}")
 
             if deleted:
                 logger.info(f"已刪除壓縮檔: {', '.join(deleted)}")
+                # 同時標記這些檔案為已處理
+                for name in deleted:
+                    self.processed_files.add(str(parent_dir / name))
+
             return True
 
         except Exception as e:
             logger.error(f"刪除壓縮檔失敗: {e}")
             return False
 
+    def _delete_single_file(self, file_path: Path):
+        """刪除單一檔案"""
+        try:
+            if self.config.delete_permanent:
+                file_path.unlink()
+            else:
+                try:
+                    import send2trash
+                    send2trash.send2trash(str(file_path))
+                except ImportError:
+                    file_path.unlink()
+        except Exception as e:
+            logger.warning(f"刪除檔案失敗: {file_path.name} - {e}")
+
     # ========== 主要解壓流程 ==========
+
+    def _mark_split_archives_processed(self, archive_path: Path):
+        """標記所有相關分割檔為已處理（僅對分割檔有意義）"""
+        # 檢查是否為分割檔 (檔名含 .part 且副檔名為 .rar)
+        name_lower = archive_path.name.lower()
+        is_split = '.part' in name_lower and name_lower.endswith('.rar')
+
+        if not is_split:
+            # 非分割檔，只標記自己
+            self.processed_files.add(str(archive_path))
+            return
+
+        # 分割檔：標記所有相關 part 檔案
+        base_name = self._get_clean_archive_name(archive_path)
+        parent_dir = archive_path.parent
+        base_name_lower = base_name.lower()
+
+        try:
+            for f in parent_dir.iterdir():
+                if not f.is_file():
+                    continue
+
+                f_stem = f.stem.lower()
+                # 移除 .partXX 後綴來比對
+                clean_stem = re.sub(r'\.part\d+$', '', f_stem)
+
+                if clean_stem == base_name_lower:
+                    if f.suffix.lower() == '.rar':
+                        self.processed_files.add(str(f))
+                        logger.debug(f"標記分割檔為已處理: {f.name}")
+        except Exception as e:
+            logger.debug(f"標記分割檔失敗: {e}")
 
     def process_archive(self, archive_path: Path, nested_level: int = 0,
                         parent_id: int = None, db_manager=None) -> ExtractResult:
@@ -452,6 +549,9 @@ class ExtractMonitor:
         """
         archive_name = archive_path.name
         archive_size = archive_path.stat().st_size if archive_path.exists() else 0
+
+        # 先標記所有相關分割檔為已處理，避免重複處理
+        self._mark_split_archives_processed(archive_path)
 
         # 發送開始訊號
         self.signals.started.emit(archive_name, archive_size)
@@ -611,35 +711,44 @@ class ExtractMonitor:
         # -y = 對所有詢問回答 yes
         base_cmd = [str(unrar_path), 'x', '-o+', '-y']
 
-        # 決定要嘗試的密碼順序
+        # 收集密碼 - 只用當前記錄匹配的密碼，不嘗試所有歷史密碼
         passwords_to_try = []
+        password_sources = {}
 
-        # 1. 嘗試根據檔名匹配的密碼
+        # 只使用檔名匹配的密碼（來自明確的映射表）
         matched_passwords = self._find_passwords_for_archive(archive_path)
-        passwords_to_try.extend(matched_passwords)
-
-        # 2. 加入所有已知密碼
-        for pwd in self.passwords:
+        for pwd in matched_passwords:
             if pwd not in passwords_to_try:
                 passwords_to_try.append(pwd)
+                password_sources[pwd] = '檔名匹配'
 
         logger.info(f"開始解壓: {archive_path.name}")
         if passwords_to_try:
-            logger.debug(f"將嘗試 {len(passwords_to_try)} 個密碼")
+            logger.info(f"找到 {len(passwords_to_try)} 個匹配的密碼")
+            for i, pwd in enumerate(passwords_to_try):
+                logger.debug(f"  密碼 {i+1}: {pwd}")
+
+        tried_passwords = []
 
         # 嘗試每個密碼
         for pwd in passwords_to_try:
+            tried_passwords.append(pwd)
             cmd = base_cmd + [f'-p{pwd}', str(archive_path), str(dest_dir) + os.sep]
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
                 if result.returncode == 0:
+                    source = password_sources.get(pwd, '未知')
                     logger.info(f"解壓成功 (有密碼): {archive_path.name}")
+                    logger.info(f"  使用密碼: {pwd} (來源: {source})")
                     return (True, pwd)
+                else:
+                    # 密碼錯誤，繼續嘗試下一個
+                    pass
             except subprocess.TimeoutExpired:
                 logger.error(f"解壓超時: {archive_path.name}")
                 return (False, None)
             except Exception as e:
-                logger.debug(f"嘗試密碼失敗: {e}")
+                logger.debug(f"嘗試密碼時發生錯誤: {e}")
 
         # 最後嘗試無密碼
         cmd = base_cmd + ['-p-', str(archive_path), str(dest_dir) + os.sep]
@@ -650,7 +759,15 @@ class ExtractMonitor:
                 return (True, None)
             else:
                 logger.error(f"解壓失敗: {archive_path.name}")
-                logger.debug(f"錯誤輸出: {result.stderr}")
+                if tried_passwords:
+                    logger.warning(f"  已嘗試 {len(tried_passwords)} 個密碼均失敗")
+                    logger.warning(f"  嘗試過的密碼: {', '.join(tried_passwords[:5])}...")
+                # 檢查錯誤類型
+                stderr = result.stderr.lower() if result.stderr else ''
+                if 'password' in stderr or 'encrypted' in stderr:
+                    logger.warning(f"  可能是密碼錯誤，請檢查密碼記錄")
+                elif 'corrupt' in stderr or 'damage' in stderr:
+                    logger.warning(f"  壓縮檔可能已損壞")
                 return (False, None)
 
         except subprocess.TimeoutExpired:
@@ -659,6 +776,92 @@ class ExtractMonitor:
         except Exception as e:
             logger.error(f"解壓異常: {e}")
             return (False, None)
+
+    def _get_all_related_passwords(self, archive_path: Path) -> List[str]:
+        """
+        從資料庫獲取所有可能與此壓縮檔相關的密碼
+
+        Args:
+            archive_path: 壓縮檔路徑
+
+        Returns:
+            密碼列表
+        """
+        passwords = []
+
+        try:
+            from ..database.db_manager import DatabaseManager
+            db = DatabaseManager()
+
+            # 取得壓縮檔的基本名稱
+            clean_name = self._get_clean_archive_name(archive_path).lower()
+            archive_name = archive_path.name.lower()
+
+            # 從資料庫取得所有密碼與標題的對應
+            records = db.get_passwords_with_titles()
+
+            for record in records:
+                pwd = record.get('password', '')
+                if not pwd:
+                    continue
+
+                # 分割多密碼 (用 | 分隔)
+                for single_pwd in pwd.split('|'):
+                    single_pwd = single_pwd.strip()
+                    if not single_pwd or single_pwd in passwords:
+                        continue
+
+                    # 檢查是否相關
+                    title = (record.get('title') or '').lower()
+                    package_name = (record.get('package_name') or '').lower()
+                    archive_filename = (record.get('archive_filename') or '').lower()
+                    jd_actual_filename = (record.get('jd_actual_filename') or '').lower()
+
+                    # 比對各種名稱
+                    is_related = False
+
+                    # 優先使用 archive_filename（壓縮檔名欄位）
+                    # 如果 archive_filename 存在，只用它比對；不存在才用 title
+                    if archive_filename:
+                        # 有壓縮檔名欄位，優先用它比對
+                        archive_filename_chars = re.sub(r'[^\u4e00-\u9fff\w]', '', archive_filename)
+                        clean_chars = re.sub(r'[^\u4e00-\u9fff\w]', '', clean_name)
+                        if (clean_name in archive_filename or
+                            archive_filename in clean_name or
+                            archive_name in archive_filename or
+                            (archive_filename_chars and clean_chars and
+                             (clean_chars in archive_filename_chars or archive_filename_chars in clean_chars))):
+                            is_related = True
+                    else:
+                        # 沒有壓縮檔名欄位，用標題比對（模糊匹配）
+                        if title:
+                            title_chars = re.sub(r'[^\u4e00-\u9fff\w]', '', title)
+                            clean_chars = re.sub(r'[^\u4e00-\u9fff\w]', '', clean_name)
+                            if title_chars and clean_chars:
+                                if clean_chars in title_chars or title_chars in clean_chars:
+                                    is_related = True
+
+                    # 比對 JD 實際檔名（額外檢查）
+                    if not is_related and jd_actual_filename and (
+                        clean_name in jd_actual_filename or
+                        jd_actual_filename in clean_name
+                    ):
+                        is_related = True
+
+                    # 比對套件名稱（額外檢查）
+                    if not is_related and package_name and (
+                        clean_name in package_name or
+                        package_name in clean_name
+                    ):
+                        is_related = True
+
+                    if is_related:
+                        passwords.append(single_pwd)
+
+        except Exception as e:
+            logger.debug(f"從資料庫獲取密碼失敗: {e}")
+
+        return passwords
 
     def _record_to_db(self, result: ExtractResult, db_manager=None) -> Optional[int]:
         """記錄解壓結果到資料庫"""

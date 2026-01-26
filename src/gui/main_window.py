@@ -15,10 +15,10 @@ from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QProgressBar, QStatusBar, QMenuBar, QMenu,
     QSplitter, QFrame, QTableWidget, QTableWidgetItem, QHeaderView,
     QDialog, QDialogButtonBox, QInputDialog, QTreeWidget, QTreeWidgetItem,
-    QScrollArea, QSystemTrayIcon
+    QScrollArea, QSystemTrayIcon, QToolTip
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QAction, QFont, QTextCursor, QIcon
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QAction, QFont, QTextCursor, QIcon, QColor, QBrush
 
 import yaml
 
@@ -28,201 +28,9 @@ from .notifications import NotificationManager
 from .download_history_widget import DownloadTimesDialog
 from .section_search_manager_widget import SectionSearchManagerWidget
 from .search_download_worker import SearchDownloadWorker
-
-
-class LogHandler:
-    """捕捉 logger 輸出並發送到 GUI"""
-    def __init__(self, signal):
-        self.signal = signal
-
-    def write(self, message):
-        if message.strip():
-            self.signal.emit(message.strip())
-
-    def flush(self):
-        pass
-
-
-class CrawlerWorker(QThread):
-    """爬蟲工作執行緒"""
-    log_signal = pyqtSignal(str)
-    finished_signal = pyqtSignal(dict)
-    progress_signal = pyqtSignal(int, int)  # current, total
-
-    def __init__(self, config_path: str, dry_run: bool = False,
-                 re_download_thanked: bool = False):
-        super().__init__()
-        self.config_path = config_path
-        self.dry_run = dry_run
-        self.re_download_thanked = re_download_thanked
-        self.is_running = True
-        self.dlp = None  # 保存 DLP01 實例以便停止
-
-    def run(self):
-        try:
-            from ..main import DLP01
-            from ..utils.logger import logger
-            import logging
-
-            # 設定 logger 輸出到 GUI
-            class GUIHandler(logging.Handler):
-                def __init__(self, signal):
-                    super().__init__()
-                    self.signal = signal
-
-                def emit(self, record):
-                    msg = self.format(record)
-                    self.signal.emit(msg)
-
-            handler = GUIHandler(self.log_signal)
-            handler.setFormatter(logging.Formatter('%(message)s'))
-            logger.addHandler(handler)
-
-            self.dlp = DLP01(config_path=self.config_path)
-            # 設定重新下載已感謝帖子選項
-            self.dlp.re_download_thanked = self.re_download_thanked
-            self.dlp.run(dry_run=self.dry_run)
-
-            self.finished_signal.emit(self.dlp.stats)
-
-        except Exception as e:
-            self.log_signal.emit(f"錯誤: {str(e)}")
-            self.finished_signal.emit({})
-        finally:
-            self.dlp = None
-
-    def stop(self):
-        """請求停止爬蟲"""
-        self.is_running = False
-        if self.dlp:
-            self.dlp.request_stop()
-
-
-class ExtractWorker(QThread):
-    """解壓監控工作執行緒"""
-    log_signal = pyqtSignal(str)
-    status_signal = pyqtSignal(str)
-    finished_signal = pyqtSignal(dict)  # 監控結束時發送統計結果
-    auto_stopped_signal = pyqtSignal(str)  # 自動停止時發送原因
-
-    def __init__(self, config: dict, use_auto_stop: bool = True):
-        super().__init__()
-        self.config = config
-        self.is_running = True
-        self.monitor = None
-        self.use_auto_stop = use_auto_stop
-
-    def run(self):
-        try:
-            from ..downloader.extract_monitor import ExtractMonitor
-            from ..database.db_manager import DatabaseManager
-            from ..utils.logger import logger
-            import logging
-
-            # 設定 logger
-            class GUIHandler(logging.Handler):
-                def __init__(self, signal):
-                    super().__init__()
-                    self.signal = signal
-
-                def emit(self, record):
-                    msg = self.format(record)
-                    self.signal.emit(msg)
-
-            handler = GUIHandler(self.log_signal)
-            handler.setFormatter(logging.Formatter('%(message)s'))
-            logger.addHandler(handler)
-
-            # 取得 JDownloader 路徑
-            jd_config = self.config.get('jdownloader', {})
-            jd_exe = jd_config.get('exe_path', '')
-            jd_path = None
-            if jd_exe:
-                # 從 exe 路徑推導 JD 安裝目錄
-                from pathlib import Path
-                jd_exe_path = Path(jd_exe)
-                # JDownloader2.exe 通常在安裝目錄下
-                if jd_exe_path.exists():
-                    jd_path = str(jd_exe_path.parent)
-
-            # 建立監控器
-            self.monitor = ExtractMonitor(
-                download_dir=self.config['paths']['download_dir'],
-                extract_dir=self.config['paths']['extract_dir'],
-                winrar_path=self.config['paths']['winrar_path'],
-                jd_path=jd_path,
-                config=self.config  # 傳遞完整設定，包含 extract 設定
-            )
-
-            if jd_path:
-                self.log_signal.emit(f"已設定 JDownloader 路徑: {jd_path}")
-
-            # 載入密碼
-            db = None
-            try:
-                db = DatabaseManager()
-                passwords = db.get_all_passwords()
-                for pwd in passwords:
-                    self.monitor.add_password(pwd)
-
-                mappings = db.get_passwords_with_titles()
-                for m in mappings:
-                    self.monitor.add_password_mapping(
-                        m['package_name'] or m['title'],
-                        m['password'],
-                        m.get('archive_filename')  # 傳入壓縮檔名稱
-                    )
-                self.log_signal.emit(f"已載入 {len(passwords)} 個密碼, {len(mappings)} 個映射")
-            except Exception as e:
-                self.log_signal.emit(f"載入密碼失敗: {e}")
-
-            # 使用自動停止模式或持續監控模式
-            if self.use_auto_stop:
-                self.status_signal.emit("監控中 (自動停止)")
-                interval = self.config.get('extract_interval', 5)
-
-                # 使用帶自動停止的監控模式
-                stats = self.monitor.run_monitor_with_auto_stop(
-                    interval=interval,
-                    delete_after=True,
-                    db_manager=db
-                )
-
-                self.finished_signal.emit(stats)
-                if stats.get('stop_reason'):
-                    self.auto_stopped_signal.emit(stats['stop_reason'])
-                self.status_signal.emit("已停止")
-            else:
-                # 持續監控模式
-                interval = self.config.get('extract_interval', 60)
-                self.status_signal.emit("監控中")
-
-                while self.is_running:
-                    try:
-                        processed = self.monitor.process_archives(delete_after=True, db_manager=db)
-                        if processed > 0:
-                            self.log_signal.emit(f"已處理 {processed} 個壓縮檔")
-                    except Exception as e:
-                        self.log_signal.emit(f"處理錯誤: {e}")
-
-                    # 分段等待，以便能夠及時停止
-                    for _ in range(interval):
-                        if not self.is_running:
-                            break
-                        self.msleep(1000)
-
-                self.status_signal.emit("已停止")
-                self.finished_signal.emit({'stop_reason': '使用者停止'})
-
-        except Exception as e:
-            self.log_signal.emit(f"監控錯誤: {str(e)}")
-            self.status_signal.emit("錯誤")
-            self.finished_signal.emit({'error': str(e)})
-
-    def stop(self):
-        self.is_running = False
-        if self.monitor:
-            self.monitor.request_stop()
+from .web_download_widget import WebDownloadWidget
+from .workers import CrawlerWorker, ExtractWorker
+from .styles import HINT_LABEL, DANGER_BUTTON, NordColors
 
 
 class MainWindow(QMainWindow):
@@ -260,6 +68,9 @@ class MainWindow(QMainWindow):
 
         # 追蹤當次爬取的連結數量
         self._current_crawl_links: List[Dict] = []
+
+        # 延遲載入追蹤 - 記錄哪些分頁已載入資料
+        self._tabs_loaded: Dict[str, bool] = {}
 
         self._init_ui()
         self._load_settings_to_ui()
@@ -358,14 +169,21 @@ class MainWindow(QMainWindow):
         # 分頁 5: 下載歷史
         self.tabs.addTab(self._create_history_tab(), "下載歷史")
 
-        # 分頁 6: 解壓記錄
+        # 分頁 6: 網頁下載
+        self.web_download_widget = WebDownloadWidget(config_path=str(self.config_path))
+        self.tabs.addTab(self.web_download_widget, "網頁下載")
+
+        # 分頁 7: 解壓記錄
         self.tabs.addTab(self._create_extract_history_tab(), "解壓記錄")
 
-        # 分頁 7: 解壓縮設定
+        # 分頁 8: 解壓縮設定
         self.tabs.addTab(self._create_extract_settings_tab(), "解壓縮設定")
 
-        # 分頁 8: 進階設定
+        # 分頁 9: 進階設定
         self.tabs.addTab(self._create_advanced_tab(), "進階設定")
+
+        # 連接分頁切換信號 - 延遲載入
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         # 狀態列
         self.statusBar().showMessage("就緒")
@@ -392,12 +210,60 @@ class MainWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
+        # 操作選單
+        action_menu = menubar.addMenu("操作")
+
+        start_crawler_action = QAction("開始爬取", self)
+        start_crawler_action.setShortcut("F5")
+        start_crawler_action.triggered.connect(self._start_crawler)
+        action_menu.addAction(start_crawler_action)
+
+        stop_crawler_action = QAction("停止爬取", self)
+        stop_crawler_action.setShortcut("Escape")
+        stop_crawler_action.triggered.connect(self._stop_crawler)
+        action_menu.addAction(stop_crawler_action)
+
+        action_menu.addSeparator()
+
+        start_extract_action = QAction("開始監控解壓", self)
+        start_extract_action.setShortcut("F6")
+        start_extract_action.triggered.connect(self._start_extract_monitor)
+        action_menu.addAction(start_extract_action)
+
+        stop_extract_action = QAction("停止監控解壓", self)
+        stop_extract_action.triggered.connect(self._stop_extract_monitor)
+        action_menu.addAction(stop_extract_action)
+
+        action_menu.addSeparator()
+
+        refresh_action = QAction("重新整理歷史", self)
+        refresh_action.setShortcut("Ctrl+R")
+        refresh_action.triggered.connect(self._refresh_history)
+        action_menu.addAction(refresh_action)
+
         # 說明選單
         help_menu = menubar.addMenu("說明")
 
         about_action = QAction("關於", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
+
+    def _on_tab_changed(self, index: int):
+        """分頁切換時的處理 - 延遲載入"""
+        tab_name = self.tabs.tabText(index)
+
+        # 如果此分頁尚未載入資料，則載入
+        if tab_name not in self._tabs_loaded:
+            self._tabs_loaded[tab_name] = True
+
+            # 根據分頁名稱載入對應資料
+            if tab_name == "下載歷史":
+                self._refresh_history()
+            elif tab_name == "解壓記錄":
+                self._refresh_extract_history()
+            elif tab_name == "網頁下載":
+                if hasattr(self, 'web_download_widget'):
+                    self.web_download_widget.load_data()
 
     def _create_main_tab(self) -> QWidget:
         """建立主控制台分頁"""
@@ -647,7 +513,7 @@ class MainWindow(QMainWindow):
 
         # 說明文字
         info_label = QLabel("✓ 已啟用  ✗ 已暫停  |  勾選群組會同時影響其下所有版區")
-        info_label.setStyleSheet("color: #666; font-size: 11px;")
+        info_label.setStyleSheet(HINT_LABEL)
         sections_layout.addWidget(info_label)
 
         # 樹狀結構顯示群組和版區
@@ -699,8 +565,11 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(sections_group)
 
-        # 關鍵字篩選
-        filters_group = QGroupBox("標題關鍵字篩選")
+        # 關鍵字篩選 (篩選 + 排除 並排)
+        keywords_layout = QHBoxLayout()
+
+        # 左側：標題篩選關鍵字
+        filters_group = QGroupBox("標題篩選關鍵字")
         filters_layout = QVBoxLayout(filters_group)
 
         self.list_filters = QListWidget()
@@ -717,8 +586,9 @@ class MainWindow(QMainWindow):
         filter_btn_layout.addWidget(btn_remove_filter)
 
         filters_layout.addLayout(filter_btn_layout)
+        keywords_layout.addWidget(filters_group)
 
-        layout.addWidget(filters_group)
+        layout.addLayout(keywords_layout)
 
         # 儲存按鈕
         btn_save = QPushButton("儲存設定")
@@ -756,29 +626,64 @@ class MainWindow(QMainWindow):
         history_group = QGroupBox("下載/解壓歷史")
         history_layout = QVBoxLayout(history_group)
 
+        # 搜尋/篩選列
+        filter_layout = QHBoxLayout()
+
+        filter_layout.addWidget(QLabel("搜尋:"))
+        self.history_search = QLineEdit()
+        self.history_search.setPlaceholderText("輸入標題、密碼或版區...")
+        self.history_search.textChanged.connect(self._on_history_search_changed)
+        self.history_search.setMaximumWidth(250)
+        filter_layout.addWidget(self.history_search)
+
+        filter_layout.addWidget(QLabel("狀態:"))
+        self.history_status_filter = QComboBox()
+        self.history_status_filter.addItems(["全部", "成功", "失敗", "未解壓"])
+        self.history_status_filter.currentTextChanged.connect(self._on_history_filter_changed)
+        filter_layout.addWidget(self.history_status_filter)
+
+        filter_layout.addStretch()
+
+        # 提示文字
+        hint_label = QLabel("提示：點擊密碼欄位複製，雙擊標題開啟帖子，右鍵更多操作")
+        hint_label.setStyleSheet(HINT_LABEL)
+        filter_layout.addWidget(hint_label)
+
+        history_layout.addLayout(filter_layout)
+
         self.history_table = QTableWidget()
-        self.history_table.setColumnCount(9)
+        self.history_table.setColumnCount(10)
         self.history_table.setHorizontalHeaderLabels([
-            "TID", "標題", "下載次數", "類型", "密碼", "送JD時間", "解壓狀態", "版區", "建立時間"
+            "TID", "標題", "下載次數", "類型", "壓縮檔名", "密碼", "送JD時間", "解壓狀態", "版區", "建立時間"
         ])
 
-        # 設定欄寬
+        # 設定欄寬 - 允許使用者調整
         header = self.history_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # TID
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)  # 標題自動延伸
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # 下載次數
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # 類型
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)  # 密碼
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)  # 送JD時間
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)  # 解壓狀態
-        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)  # 版區
-        header.setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents)  # 建立時間
+        # 設定預設寬度
+        self.history_table.setColumnWidth(0, 70)   # TID
+        self.history_table.setColumnWidth(2, 60)   # 下載次數
+        self.history_table.setColumnWidth(3, 80)   # 類型
+        self.history_table.setColumnWidth(4, 150)  # 壓縮檔名
+        self.history_table.setColumnWidth(5, 200)  # 密碼
+        self.history_table.setColumnWidth(6, 120)  # 送JD時間
+        self.history_table.setColumnWidth(7, 60)   # 解壓狀態
+        self.history_table.setColumnWidth(8, 100)  # 版區
+        self.history_table.setColumnWidth(9, 120)  # 建立時間
 
         self.history_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.history_table.setAlternatingRowColors(True)
         self.history_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        # 點擊下載次數欄位時顯示詳細記錄
+        # 啟用表格排序
+        self.history_table.setSortingEnabled(True)
+        # 點擊處理 (密碼複製、下載次數詳細)
         self.history_table.cellClicked.connect(self._on_history_cell_clicked)
+        # 雙擊開啟帖子頁面
+        self.history_table.cellDoubleClicked.connect(self._on_history_cell_double_clicked)
+        # 右鍵選單
+        self.history_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.history_table.customContextMenuRequested.connect(self._on_history_context_menu)
 
         history_layout.addWidget(self.history_table)
 
@@ -963,6 +868,26 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(extract_group)
 
+        # 特殊下載關鍵字設定
+        keyword_group = QGroupBox("特殊下載關鍵字")
+        keyword_layout = QGridLayout(keyword_group)
+
+        # 網頁下載關鍵字
+        keyword_layout.addWidget(QLabel("網頁下載關鍵字:"), 0, 0)
+        self.txt_web_download_keywords = QLineEdit()
+        self.txt_web_download_keywords.setPlaceholderText("用逗號分隔，例如: @gd, @mega")
+        self.txt_web_download_keywords.setToolTip("符合這些關鍵字的帖子會記錄到「網頁下載」分頁，不會發送到 JDownloader")
+        keyword_layout.addWidget(self.txt_web_download_keywords, 0, 1)
+
+        # SMG 關鍵字
+        keyword_layout.addWidget(QLabel("SMG 關鍵字:"), 1, 0)
+        self.txt_smg_keywords = QLineEdit()
+        self.txt_smg_keywords.setPlaceholderText("用逗號分隔，例如: @smg")
+        self.txt_smg_keywords.setToolTip("符合這些關鍵字的帖子會發送到 SMG 下載器")
+        keyword_layout.addWidget(self.txt_smg_keywords, 1, 1)
+
+        layout.addWidget(keyword_group)
+
         # 資料庫管理設定
         db_group = QGroupBox("資料庫管理")
         db_layout = QGridLayout(db_group)
@@ -980,7 +905,7 @@ class MainWindow(QMainWindow):
         db_layout.addWidget(QLabel(""), 1, 0)  # 空行
 
         btn_clear_all = QPushButton("一鍵清除所有記錄")
-        btn_clear_all.setStyleSheet("background-color: #ff6b6b; color: white;")
+        btn_clear_all.setStyleSheet(DANGER_BUTTON)
         btn_clear_all.clicked.connect(self._clear_all_records)
         db_layout.addWidget(btn_clear_all, 2, 0, 1, 3)
 
@@ -1015,6 +940,13 @@ class MainWindow(QMainWindow):
         smg = self.config.get('smg', {})
         self.txt_smg_exe.setText(smg.get('exe_path', ''))
         self.txt_smg_download_dir.setText(smg.get('download_dir', ''))
+
+        # 特殊下載關鍵字
+        forum = self.config.get('forum', {})
+        web_keywords = forum.get('web_download_keywords', [])
+        smg_keywords = forum.get('smg_keywords', [])
+        self.txt_web_download_keywords.setText(', '.join(web_keywords))
+        self.txt_smg_keywords.setText(', '.join(smg_keywords))
 
         # 版區設定 (群組化)
         self._load_sections_to_tree()
@@ -1248,6 +1180,22 @@ class MainWindow(QMainWindow):
             self.config['database'] = {}
         self.config['database']['retention_days'] = self.spin_retention_days.value()
 
+        # 特殊下載關鍵字
+        if 'forum' not in self.config:
+            self.config['forum'] = {}
+
+        # 解析關鍵字 (用逗號分隔)
+        web_keywords_text = self.txt_web_download_keywords.text().strip()
+        smg_keywords_text = self.txt_smg_keywords.text().strip()
+
+        self.config['forum']['web_download_keywords'] = [
+            k.strip() for k in web_keywords_text.split(',') if k.strip()
+        ] if web_keywords_text else []
+
+        self.config['forum']['smg_keywords'] = [
+            k.strip() for k in smg_keywords_text.split(',') if k.strip()
+        ] if smg_keywords_text else []
+
         self._save_config()
 
     def _load_sections_to_tree(self):
@@ -1287,8 +1235,8 @@ class MainWindow(QMainWindow):
             group_item.setFont(0, font)
 
             if not group_enabled:
-                group_item.setForeground(0, Qt.GlobalColor.gray)
-                group_item.setForeground(2, Qt.GlobalColor.red)
+                group_item.setForeground(0, QColor(*NordColors.POLAR_NIGHT_3))
+                group_item.setForeground(2, QColor(*NordColors.AURORA_RED))
 
             # 加入該群組的版區
             for section in group.get('sections', []):
@@ -1307,9 +1255,9 @@ class MainWindow(QMainWindow):
                 })
 
                 if not section_enabled or not group_enabled:
-                    section_item.setForeground(0, Qt.GlobalColor.gray)
-                    section_item.setForeground(1, Qt.GlobalColor.gray)
-                    section_item.setForeground(2, Qt.GlobalColor.red)
+                    section_item.setForeground(0, QColor(*NordColors.POLAR_NIGHT_3))
+                    section_item.setForeground(1, QColor(*NordColors.POLAR_NIGHT_3))
+                    section_item.setForeground(2, QColor(*NordColors.AURORA_RED))
 
         self.tree_sections.blockSignals(False)
 
@@ -1417,9 +1365,12 @@ class MainWindow(QMainWindow):
             f"批次下載完成!\n\n"
             f"成功: {stats.get('success', 0)}\n"
             f"失敗: {stats.get('failed', 0)}\n"
-            f"跳過: {stats.get('skipped', 0)}\n"
             f"提取連結數: {stats.get('links_extracted', 0)}"
         )
+        if stats.get('web_downloads', 0) > 0:
+            msg += f"\n網頁下載: {stats.get('web_downloads', 0)}"
+        if stats.get('smg_downloads', 0) > 0:
+            msg += f"\nSMG 下載: {stats.get('smg_downloads', 0)}"
         QMessageBox.information(self, "完成", msg)
 
         # 清理
@@ -1520,13 +1471,13 @@ class MainWindow(QMainWindow):
         current.setText(2, "✓" if new_enabled else "✗")
 
         if new_enabled:
-            current.setForeground(0, Qt.GlobalColor.black)
-            current.setForeground(1, Qt.GlobalColor.black)
-            current.setForeground(2, Qt.GlobalColor.darkGreen)
+            current.setForeground(0, QColor(*NordColors.SNOW_STORM_2))
+            current.setForeground(1, QColor(*NordColors.SNOW_STORM_2))
+            current.setForeground(2, QColor(*NordColors.AURORA_GREEN))
         else:
-            current.setForeground(0, Qt.GlobalColor.gray)
-            current.setForeground(1, Qt.GlobalColor.gray)
-            current.setForeground(2, Qt.GlobalColor.red)
+            current.setForeground(0, QColor(*NordColors.POLAR_NIGHT_3))
+            current.setForeground(1, QColor(*NordColors.POLAR_NIGHT_3))
+            current.setForeground(2, QColor(*NordColors.AURORA_RED))
 
         # 如果是群組，同時更新所有子版區的顯示
         if data.get('type') == 'group':
@@ -1536,13 +1487,13 @@ class MainWindow(QMainWindow):
                     child_data = child.data(0, Qt.ItemDataRole.UserRole)
                     child_enabled = child_data.get('enabled', True) if child_data else True
                     if child_enabled:
-                        child.setForeground(0, Qt.GlobalColor.black)
-                        child.setForeground(1, Qt.GlobalColor.black)
-                        child.setForeground(2, Qt.GlobalColor.darkGreen)
+                        child.setForeground(0, QColor(*NordColors.SNOW_STORM_2))
+                        child.setForeground(1, QColor(*NordColors.SNOW_STORM_2))
+                        child.setForeground(2, QColor(*NordColors.AURORA_GREEN))
                 else:
-                    child.setForeground(0, Qt.GlobalColor.gray)
-                    child.setForeground(1, Qt.GlobalColor.gray)
-                    child.setForeground(2, Qt.GlobalColor.red)
+                    child.setForeground(0, QColor(*NordColors.POLAR_NIGHT_3))
+                    child.setForeground(1, QColor(*NordColors.POLAR_NIGHT_3))
+                    child.setForeground(2, QColor(*NordColors.AURORA_RED))
 
         status = "啟用" if new_enabled else "暫停"
         self.statusBar().showMessage(f"已{status}: {current.text(0).strip()}", 3000)
@@ -1987,9 +1938,19 @@ class MainWindow(QMainWindow):
 
     def _start_crawler(self):
         """開始爬取"""
+        # 先儲存版區設定，確保使用最新的啟用狀態
+        self._save_sections_settings()
+
+        # 檢查是否有啟用的版區
+        active_sections = self.config.get('forum', {}).get('target_sections', [])
+        if not active_sections:
+            self._append_log("錯誤: 沒有啟用任何版區，請先在版區設定中啟用至少一個版區")
+            return
+
         # 顯示目前使用的設定檔
         self._append_log("=" * 50)
         self._append_log(f"【開始爬取】使用設定檔: {self.current_profile}")
+        self._append_log(f"啟用版區: {', '.join(s['name'] for s in active_sections)}")
         self._append_log("=" * 50)
 
         # 檢查是否需要自動啟動 JDownloader
@@ -2023,9 +1984,18 @@ class MainWindow(QMainWindow):
     def _stop_crawler(self):
         """停止爬取"""
         if self.crawler_worker:
-            self.crawler_worker.stop()
-            self.crawler_worker.wait(5000)
-            self.crawler_worker = None
+            try:
+                self.crawler_worker.stop()
+                # 等待執行緒結束，但不要無限等待
+                if not self.crawler_worker.wait(3000):
+                    # 3 秒後仍未結束，強制終止
+                    self._append_log("爬蟲執行緒未在時限內結束，強制終止")
+                    self.crawler_worker.terminate()
+                    self.crawler_worker.wait(1000)
+            except Exception as e:
+                self._append_log(f"停止爬蟲時發生錯誤: {e}")
+            finally:
+                self.crawler_worker = None
 
         self.btn_start_crawler.setEnabled(True)
         self.btn_stop_crawler.setEnabled(False)
@@ -2051,6 +2021,11 @@ class MainWindow(QMainWindow):
             # 如果有提取連結，啟動 JD 狀態輪詢器
             if total_links > 0:
                 self._start_jd_polling()
+
+            # 刷新網頁下載記錄
+            web_downloads = stats.get('web_downloads', 0)
+            if web_downloads > 0 and hasattr(self, 'web_download_widget'):
+                self.web_download_widget.load_data()
 
     def _start_jd_polling(self):
         """啟動 JDownloader 狀態輪詢"""
@@ -2121,10 +2096,6 @@ class MainWindow(QMainWindow):
                 self._append_log(f"[JD監控] 開始輪詢 ({len(expected_files)} 個檔案，間隔 15 秒)")
             else:
                 self._append_log("[JD監控] 沒有待下載的檔案，跳過監控")
-                # 沒有待下載項目，直接啟動解壓監控
-                if self.extract_worker is None or not self.extract_worker.isRunning():
-                    self._append_log("[JD監控] 直接啟動解壓監控...")
-                    QTimer.singleShot(2000, self._start_extract_monitor)
 
         except Exception as e:
             self._append_log(f"[JD監控] 啟動失敗: {e}")
@@ -2134,26 +2105,21 @@ class MainWindow(QMainWindow):
     def _on_jd_file_complete(self, package_name: str, filename: str):
         """單一檔案下載完成"""
         self._append_log(f"[JD] 下載完成: {package_name}")
+        self._append_log(f"[JD] 實際檔名: {filename if filename else '(未取得)'}")
 
     def _on_jd_progress(self, completed: int, total: int):
         """JD 下載進度更新"""
         self.crawler_status.setText(f"狀態: JD 下載中 ({completed}/{total})")
 
     def _on_jd_all_complete(self, count: int):
-        """所有 JD 下載完成 - 自動啟動解壓監控"""
+        """所有 JD 下載完成"""
         self._append_log(f"[JD] 全部 {count} 個檔案下載完成！")
         self.crawler_status.setText("狀態: JD 下載完成")
         self.notification_manager.show_toast(
             "下載完成",
-            f"JDownloader 已完成 {count} 個檔案下載，即將啟動解壓監控",
+            f"JDownloader 已完成 {count} 個檔案下載",
             notification_type="success"
         )
-
-        # 自動啟動解壓監控
-        if self.extract_worker is None or not self.extract_worker.isRunning():
-            self._append_log("自動啟動解壓監控...")
-            # 使用 QTimer 延遲啟動，確保 JD 完全處理完畢
-            QTimer.singleShot(3000, self._start_extract_monitor)
 
     def _start_extract_monitor(self):
         """開始解壓監控"""
@@ -2229,7 +2195,6 @@ class MainWindow(QMainWindow):
         """重新整理下載歷史"""
         try:
             from ..database.db_manager import DatabaseManager
-            from PyQt6.QtGui import QColor, QBrush
             db = DatabaseManager()
 
             # 更新統計資訊
@@ -2241,48 +2206,65 @@ class MainWindow(QMainWindow):
             self.lbl_extract_failed.setText(f"解壓失敗: {stats.get('extract_failed', 0)}")
             self.lbl_pending_extract.setText(f"待解壓: {stats.get('pending_extract', 0)}")
 
-            # 更新歷史記錄表格
-            history = db.get_download_history(limit=200)
-            self.history_table.setRowCount(len(history))
+            # 更新歷史記錄表格 - 按 tid 合併記錄
+            history = db.get_download_history(limit=500)
+            merged = self._merge_history_by_tid(history)
 
-            for row, record in enumerate(history):
+            # 暫停 UI 更新以提升效能
+            self.history_table.setUpdatesEnabled(False)
+            self.history_table.setRowCount(len(merged))
+
+            for row, record in enumerate(merged):
                 tid = record.get('thread_id', '')
                 title = record.get('title', '')
-
-                # 取得下載次數
-                download_count = db.get_download_count(tid) if tid else 0
+                download_count = record.get('download_count', 1)
 
                 # TID
                 self.history_table.setItem(row, 0, QTableWidgetItem(tid))
 
-                # 標題
-                self.history_table.setItem(row, 1, QTableWidgetItem(title))
+                # 標題 - 儲存完整記錄供雙擊使用
+                title_item = QTableWidgetItem(title)
+                title_item.setData(Qt.ItemDataRole.UserRole, record)
+                self.history_table.setItem(row, 1, title_item)
 
                 # 下載次數 - 可點擊，帶醒目顯示
                 count_item = QTableWidgetItem(f"[{download_count}]")
                 count_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                count_item.setData(Qt.ItemDataRole.UserRole, tid)  # 儲存 TID 供點擊使用
+                count_item.setData(Qt.ItemDataRole.UserRole, tid)
 
-                # 根據次數設定背景色
+                # 根據次數設定顏色
                 if download_count >= 3:
-                    count_item.setBackground(QBrush(QColor(255, 100, 100)))  # 紅色
+                    count_item.setForeground(QColor(*NordColors.AURORA_RED))  # 紅色
                     count_item.setFont(QFont("", -1, QFont.Weight.Bold))
                 elif download_count >= 2:
-                    count_item.setBackground(QBrush(QColor(255, 200, 100)))  # 橘色
+                    count_item.setForeground(QColor(*NordColors.AURORA_ORANGE))  # 橘色
 
                 self.history_table.setItem(row, 2, count_item)
 
                 # 類型
-                self.history_table.setItem(row, 3, QTableWidgetItem(record.get('link_type', '')))
+                link_types = record.get('link_types', [])
+                type_text = ', '.join(set(link_types)) if link_types else ''
+                self.history_table.setItem(row, 3, QTableWidgetItem(type_text))
 
-                # 密碼
-                self.history_table.setItem(row, 4, QTableWidgetItem(record.get('password', '')))
+                # 壓縮檔名
+                archive_names = record.get('archive_filenames', [])
+                archive_text = archive_names[0] if archive_names else ''
+                archive_item = QTableWidgetItem(archive_text[:30] + '...' if len(archive_text) > 30 else archive_text)
+                archive_item.setToolTip('\n'.join(archive_names) if archive_names else '')
+                self.history_table.setItem(row, 4, archive_item)
+
+                # 密碼 - 可點擊複製
+                password = record.get('password', '') or ''
+                password_item = QTableWidgetItem(password)
+                if password:
+                    password_item.setForeground(QColor(*NordColors.AURORA_RED))
+                self.history_table.setItem(row, 5, password_item)
 
                 # 送JD時間
                 sent_time = record.get('sent_to_jd_at', '')
                 if sent_time:
-                    sent_time = sent_time[:16].replace('T', ' ')  # 格式化時間
-                self.history_table.setItem(row, 5, QTableWidgetItem(sent_time))
+                    sent_time = sent_time[:16].replace('T', ' ')
+                self.history_table.setItem(row, 6, QTableWidgetItem(sent_time))
 
                 # 解壓狀態
                 extract_success = record.get('extract_success')
@@ -2292,51 +2274,250 @@ class MainWindow(QMainWindow):
                     status = "成功"
                 else:
                     status = "失敗"
-                self.history_table.setItem(row, 6, QTableWidgetItem(status))
+                self.history_table.setItem(row, 7, QTableWidgetItem(status))
 
                 # 版區
-                self.history_table.setItem(row, 7, QTableWidgetItem(record.get('forum_section', '')))
+                self.history_table.setItem(row, 8, QTableWidgetItem(record.get('forum_section', '')))
 
                 # 建立時間
                 created = record.get('created_at', '')
                 if created:
                     created = created[:16].replace('T', ' ')
-                self.history_table.setItem(row, 8, QTableWidgetItem(created))
+                self.history_table.setItem(row, 9, QTableWidgetItem(created))
 
-            self.statusBar().showMessage(f"已載入 {len(history)} 筆記錄", 3000)
+            # 恢復 UI 更新
+            self.history_table.setUpdatesEnabled(True)
+
+            self.statusBar().showMessage(f"已載入 {len(merged)} 筆記錄 ({len(history)} 個連結)", 3000)
 
         except Exception as e:
             QMessageBox.warning(self, "錯誤", f"載入歷史記錄失敗: {e}")
 
+    def _merge_history_by_tid(self, history: list) -> list:
+        """按 thread_id 合併下載歷史記錄"""
+        merged = {}
+        for record in history:
+            tid = record.get('thread_id', '')
+            if tid not in merged:
+                merged[tid] = {
+                    'thread_id': tid,
+                    'title': record.get('title', ''),
+                    'post_url': record.get('post_url', ''),
+                    'forum_section': record.get('forum_section', ''),
+                    'password': record.get('password', ''),
+                    'sent_to_jd_at': record.get('sent_to_jd_at', ''),
+                    'extract_success': record.get('extract_success'),
+                    'created_at': record.get('created_at', ''),
+                    'download_count': 0,
+                    'link_types': [],
+                    'archive_filenames': [],
+                    'link_urls': []
+                }
+            m = merged[tid]
+            m['download_count'] += 1
+
+            # 收集連結類型
+            link_type = record.get('link_type', '')
+            if link_type and link_type not in m['link_types']:
+                m['link_types'].append(link_type)
+
+            # 收集壓縮檔名 - 優先使用 jd_actual_filename（JD 實際下載的檔名）
+            jd_actual = record.get('jd_actual_filename', '')
+            archive_name = record.get('archive_filename', '')
+            # 優先用 JD 實際檔名
+            filename_to_use = jd_actual or archive_name
+            if filename_to_use:
+                for name in filename_to_use.split('|'):
+                    if name and name not in m['archive_filenames']:
+                        m['archive_filenames'].append(name)
+
+            # 收集連結
+            link_url = record.get('link_url', '')
+            if link_url and link_url not in m['link_urls']:
+                m['link_urls'].append(link_url)
+
+            # 保留最新時間
+            if record.get('created_at', '') > m['created_at']:
+                m['created_at'] = record.get('created_at', '')
+
+            # 保留密碼
+            if record.get('password') and not m['password']:
+                m['password'] = record.get('password')
+
+            # 保留解壓狀態（優先顯示成功）
+            if record.get('extract_success') is True:
+                m['extract_success'] = True
+            elif m['extract_success'] is None and record.get('extract_success') is False:
+                m['extract_success'] = False
+
+        # 轉換為列表並按時間排序
+        result = list(merged.values())
+        result.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        return result
+
     def _on_history_cell_clicked(self, row: int, column: int):
-        """處理歷史表格點擊 - 下載次數欄位彈出詳細記錄"""
-        # 只處理下載次數欄位 (column 2)
-        if column != 2:
+        """處理歷史表格點擊 - 密碼複製、下載次數詳細"""
+        # 密碼欄位 (column 5) - 點擊複製
+        if column == 5:
+            item = self.history_table.item(row, column)
+            if item:
+                password = item.text()
+                if password:
+                    from PyQt6.QtWidgets import QApplication
+                    from PyQt6.QtGui import QCursor
+                    clipboard = QApplication.clipboard()
+                    clipboard.setText(password)
+                    QToolTip.showText(QCursor.pos(), "複製成功", self.history_table, self.history_table.rect(), 1500)
             return
 
-        item = self.history_table.item(row, 2)
-        if not item:
-            return
+        # 下載次數欄位 (column 2) - 彈出詳細記錄
+        if column == 2:
+            item = self.history_table.item(row, 2)
+            if not item:
+                return
 
-        tid = item.data(Qt.ItemDataRole.UserRole)
-        if not tid:
-            return
+            tid = item.data(Qt.ItemDataRole.UserRole)
+            if not tid:
+                return
 
-        # 取得標題
+            # 取得標題
+            title_item = self.history_table.item(row, 1)
+            title = title_item.text() if title_item else ""
+
+            # 取得下載時間記錄並顯示對話框
+            try:
+                from ..database.db_manager import DatabaseManager
+                db = DatabaseManager()
+                times = db.get_download_times(tid)
+
+                if times:
+                    dialog = DownloadTimesDialog(tid, title, times, self)
+                    dialog.exec()
+            except Exception as e:
+                self._append_log(f"載入下載時間失敗: {e}")
+
+    def _on_history_cell_double_clicked(self, row: int, column: int):
+        """處理歷史表格雙擊 - 開啟帖子頁面"""
+        import webbrowser
         title_item = self.history_table.item(row, 1)
-        title = title_item.text() if title_item else ""
+        if title_item:
+            record = title_item.data(Qt.ItemDataRole.UserRole)
+            if record:
+                post_url = record.get('post_url', '')
+                if post_url:
+                    if not post_url.startswith('http'):
+                        post_url = f"https://fastzone.org/{post_url}"
+                    webbrowser.open(post_url)
 
-        # 取得下載時間記錄並顯示對話框
-        try:
-            from ..database.db_manager import DatabaseManager
-            db = DatabaseManager()
-            times = db.get_download_times(tid)
+    def _on_history_search_changed(self, text: str):
+        """搜尋文字變更"""
+        self._apply_history_filter()
 
-            if times:
-                dialog = DownloadTimesDialog(tid, title, times, self)
-                dialog.exec()
-        except Exception as e:
-            self._append_log(f"載入下載時間失敗: {e}")
+    def _on_history_filter_changed(self, text: str):
+        """篩選條件變更"""
+        self._apply_history_filter()
+
+    def _apply_history_filter(self):
+        """套用歷史記錄篩選"""
+        search_text = self.history_search.text().lower()
+        status_filter = self.history_status_filter.currentText()
+
+        for row in range(self.history_table.rowCount()):
+            # 取得各欄位資料
+            title_item = self.history_table.item(row, 1)  # 標題
+            password_item = self.history_table.item(row, 5)  # 密碼
+            section_item = self.history_table.item(row, 8)  # 版區
+            status_item = self.history_table.item(row, 7)  # 解壓狀態
+
+            title = title_item.text().lower() if title_item else ''
+            password = password_item.text().lower() if password_item else ''
+            section = section_item.text().lower() if section_item else ''
+            status = status_item.text() if status_item else ''
+
+            # 搜尋條件
+            match_search = (
+                not search_text or
+                search_text in title or
+                search_text in password or
+                search_text in section
+            )
+
+            # 狀態條件
+            match_status = (
+                status_filter == "全部" or
+                status == status_filter
+            )
+
+            # 顯示或隱藏行
+            self.history_table.setRowHidden(row, not (match_search and match_status))
+
+    def _on_history_context_menu(self, pos):
+        """顯示歷史記錄右鍵選單"""
+        row = self.history_table.rowAt(pos.y())
+        if row < 0:
+            return
+
+        title_item = self.history_table.item(row, 1)
+        if not title_item:
+            return
+
+        record = title_item.data(Qt.ItemDataRole.UserRole)
+        if not record:
+            return
+
+        menu = QMenu(self)
+
+        # 開啟帖子
+        action_open_post = QAction("開啟帖子頁面", self)
+        action_open_post.triggered.connect(lambda: self._open_post_from_record(record))
+        menu.addAction(action_open_post)
+
+        menu.addSeparator()
+
+        # 複製密碼
+        password = record.get('password', '')
+        if password:
+            action_copy_password = QAction(f"複製密碼: {password}", self)
+            action_copy_password.triggered.connect(lambda: self._copy_to_clipboard(password, "密碼"))
+            menu.addAction(action_copy_password)
+
+        # 複製標題
+        action_copy_title = QAction("複製標題", self)
+        action_copy_title.triggered.connect(lambda: self._copy_to_clipboard(record.get('title', ''), "標題"))
+        menu.addAction(action_copy_title)
+
+        # 複製 TID
+        action_copy_tid = QAction(f"複製 TID: {record.get('thread_id', '')}", self)
+        action_copy_tid.triggered.connect(lambda: self._copy_to_clipboard(record.get('thread_id', ''), "TID"))
+        menu.addAction(action_copy_tid)
+
+        menu.addSeparator()
+
+        # 複製下載連結
+        link_urls = record.get('link_urls', [])
+        if link_urls:
+            action_copy_links = QAction(f"複製下載連結 ({len(link_urls)} 個)", self)
+            action_copy_links.triggered.connect(lambda: self._copy_to_clipboard('\n'.join(link_urls), "下載連結"))
+            menu.addAction(action_copy_links)
+
+        menu.exec(self.history_table.mapToGlobal(pos))
+
+    def _open_post_from_record(self, record: dict):
+        """從記錄開啟帖子頁面"""
+        import webbrowser
+        post_url = record.get('post_url', '')
+        if post_url:
+            if not post_url.startswith('http'):
+                post_url = f"https://fastzone.org/{post_url}"
+            webbrowser.open(post_url)
+
+    def _copy_to_clipboard(self, text: str, label: str = ""):
+        """複製文字到剪貼簿"""
+        from PyQt6.QtWidgets import QApplication
+        from PyQt6.QtGui import QCursor
+        clipboard = QApplication.clipboard()
+        clipboard.setText(text)
+        QToolTip.showText(QCursor.pos(), f"已複製{label}", self, self.rect(), 1500)
 
     def _cleanup_old_records(self):
         """清理舊記錄"""
@@ -2564,10 +2745,21 @@ class MainWindow(QMainWindow):
         # 停止所有工作執行緒
         if self.crawler_worker and self.crawler_worker.isRunning():
             self.crawler_worker.stop()
-            self.crawler_worker.wait(3000)
+            if not self.crawler_worker.wait(3000):
+                self.crawler_worker.terminate()
 
         if self.extract_worker and self.extract_worker.isRunning():
             self.extract_worker.stop()
-            self.extract_worker.wait(3000)
+            if not self.extract_worker.wait(3000):
+                self.extract_worker.terminate()
+
+        if self.search_download_worker and self.search_download_worker.isRunning():
+            self.search_download_worker.stop()
+            if not self.search_download_worker.wait(3000):
+                self.search_download_worker.terminate()
+
+        # 停止 JD 輪詢器
+        if self.jd_poller and self.jd_poller.is_polling():
+            self.jd_poller.stop_polling("程式關閉")
 
         event.accept()

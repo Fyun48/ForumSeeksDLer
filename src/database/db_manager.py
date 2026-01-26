@@ -170,6 +170,7 @@ class DatabaseManager:
             # 為 web_downloads 增加欄位（遷移現有資料庫）
             web_download_columns = [
                 ('downloaded_at', 'DATETIME'),
+                ('archive_filename', 'TEXT'),
             ]
             for column_name, column_type in web_download_columns:
                 try:
@@ -360,7 +361,7 @@ class DatabaseManager:
 
             # 從 web_downloads 表查詢（網頁下載/特殊關鍵字）
             cursor.execute('''
-                SELECT DISTINCT password, title, keyword
+                SELECT DISTINCT password, title, keyword, archive_filename
                 FROM web_downloads
                 WHERE password IS NOT NULL AND password != ''
             ''')
@@ -369,7 +370,7 @@ class DatabaseManager:
                     'password': row[0],
                     'package_name': row[1],  # 用 title 當作 package_name
                     'title': row[1],
-                    'archive_filename': None,
+                    'archive_filename': row[3],  # 標記已下載時設定的壓縮檔名
                     'jd_actual_filename': None,
                     'source': 'web_download',
                     'keyword': row[2]
@@ -1174,29 +1175,29 @@ class DatabaseManager:
             cursor = conn.cursor()
             now = datetime.now().isoformat()
 
-            # 更新 downloaded_at
+            # 先取得該 thread_id 的標題
+            cursor.execute('''
+                SELECT title FROM web_downloads
+                WHERE thread_id = ?
+                LIMIT 1
+            ''', (thread_id,))
+            row = cursor.fetchone()
+            title = row[0] if row else ''
+
+            # 更新 downloaded_at 和 archive_filename（用標題當作壓縮檔名）
             cursor.execute('''
                 UPDATE web_downloads
-                SET downloaded_at = ?
+                SET downloaded_at = ?, archive_filename = ?
                 WHERE thread_id = ? AND downloaded_at IS NULL
-            ''', (now, thread_id))
+            ''', (now, title, thread_id))
             updated_count = cursor.rowcount
 
-            # 取得該 thread_id 的資料用於記錄歷史
-            if record_history and updated_count > 0:
+            # 記錄到 download_history（用於追蹤下載次數）
+            if record_history and updated_count > 0 and title:
                 cursor.execute('''
-                    SELECT title FROM web_downloads
-                    WHERE thread_id = ?
-                    LIMIT 1
-                ''', (thread_id,))
-                row = cursor.fetchone()
-                if row:
-                    title = row[0] or ''
-                    # 記錄到 download_history（用於追蹤下載次數）
-                    cursor.execute('''
-                        INSERT INTO download_history (tid, download_time, filename, post_id)
-                        VALUES (?, ?, ?, NULL)
-                    ''', (thread_id, now, f'[網頁下載] {title}'))
+                    INSERT INTO download_history (tid, download_time, filename, post_id)
+                    VALUES (?, ?, ?, NULL)
+                ''', (thread_id, now, f'[網頁下載] {title}'))
 
             return updated_count
 

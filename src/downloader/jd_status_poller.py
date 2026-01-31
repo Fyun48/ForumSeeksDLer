@@ -147,8 +147,12 @@ class JDStatusPoller(QObject):
                             try:
                                 from ..database.db_manager import DatabaseManager
                                 db = DatabaseManager()
-                                updated = db.update_jd_actual_filename(jd_pkg_name, jd_file_name)
-                                logger.info(f"已儲存實際檔名: {jd_file_name} (更新 {updated} 筆)")
+                                # 使用 matched_pkg (我們資料庫中的名稱) 而非 jd_pkg_name (JD 的名稱)
+                                updated = db.update_jd_actual_filename(matched_pkg, jd_file_name)
+                                if updated == 0:
+                                    # 若用 matched_pkg 找不到，嘗試用 jd_pkg_name
+                                    updated = db.update_jd_actual_filename(jd_pkg_name, jd_file_name)
+                                logger.info(f"已儲存實際檔名: {jd_file_name} (更新 {updated} 筆, pkg={matched_pkg})")
                             except Exception as e:
                                 logger.warning(f"儲存實際檔名失敗: {e}")
 

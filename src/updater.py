@@ -126,7 +126,12 @@ class UpdateChecker:
         if use_cache:
             cached = self._load_cache()
             if cached:
-                logger.debug("使用快取的更新資訊")
+                # 更新目前版本為實際執行的版本
+                cached['current_version'] = VERSION
+                # 重新檢查是否需要更新 (可能已經更新過了)
+                latest = cached.get('latest_version', '')
+                cached['available'] = latest and is_newer_version(latest)
+                logger.debug(f"使用快取的更新資訊 (current={VERSION}, latest={latest}, available={cached['available']})")
                 return cached
 
         # 從 GitHub API 取得最新版本

@@ -30,7 +30,7 @@ DefaultGroupName={#MyAppName}
 ; 輸出設定
 OutputDir=..\dist
 OutputBaseFilename={#MyAppName}_Setup_v{#MyAppVersion}
-SetupIconFile=..\assets\icon.ico
+; SetupIconFile=..\assets\icon.ico  ; 如有圖示檔案可取消註解
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -51,8 +51,8 @@ InfoAfterFile=
 
 ; 支援的語言
 [Languages]
-Name: "chinesetraditional"; MessagesFile: "compiler:Languages\ChineseTraditional.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
+; Name: "chinesetraditional"; MessagesFile: "compiler:Languages\ChineseTraditional.isl"  ; 需另外下載
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked

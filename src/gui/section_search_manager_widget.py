@@ -19,6 +19,7 @@ from PyQt6.QtGui import QFont, QColor, QBrush, QAction, QCursor
 
 from ..database.db_manager import DatabaseManager
 from ..utils.logger import logger
+from .styles import HINT_LABEL, FAVORITE_BUTTON, COMMON_BUTTON, MUTED_BUTTON
 
 
 class SyncWorker(QThread):
@@ -216,12 +217,12 @@ class SectionSearchManagerWidget(QWidget):
         select_layout.addWidget(QLabel("將勾選的版區設為:"))
 
         btn_set_favorite = QPushButton("★ 我的最愛")
-        btn_set_favorite.setStyleSheet("QPushButton { color: #d4a000; font-weight: bold; }")
+        btn_set_favorite.setStyleSheet(FAVORITE_BUTTON)
         btn_set_favorite.clicked.connect(lambda: self._set_selected_category("我的最愛"))
         select_layout.addWidget(btn_set_favorite)
 
         btn_set_common = QPushButton("◆ 常用")
-        btn_set_common.setStyleSheet("QPushButton { color: #0066cc; font-weight: bold; }")
+        btn_set_common.setStyleSheet(COMMON_BUTTON)
         btn_set_common.clicked.connect(lambda: self._set_selected_category("常用"))
         select_layout.addWidget(btn_set_common)
 
@@ -230,7 +231,7 @@ class SectionSearchManagerWidget(QWidget):
         select_layout.addWidget(btn_set_other)
 
         btn_clear_category = QPushButton("✕ 清除分類")
-        btn_clear_category.setStyleSheet("QPushButton { color: #999; }")
+        btn_clear_category.setStyleSheet(MUTED_BUTTON)
         btn_clear_category.clicked.connect(lambda: self._set_selected_category(""))
         select_layout.addWidget(btn_clear_category)
 
@@ -281,7 +282,7 @@ class SectionSearchManagerWidget(QWidget):
 
         # 搜尋範圍顯示
         self.lbl_search_scope = QLabel("搜尋範圍: (請勾選版區)")
-        self.lbl_search_scope.setStyleSheet("color: #666; font-size: 11px;")
+        self.lbl_search_scope.setStyleSheet(HINT_LABEL)
         self.lbl_search_scope.setWordWrap(True)
         self.lbl_search_scope.setMaximumHeight(40)
         bottom_layout.addWidget(self.lbl_search_scope)
@@ -813,6 +814,7 @@ class SectionSearchManagerWidget(QWidget):
         filtered_count = len(filtered_results)
 
         self.result_table.blockSignals(True)
+        self.result_table.setUpdatesEnabled(False)
         self.result_table.setRowCount(filtered_count)
 
         # 計算重複數量
@@ -859,6 +861,7 @@ class SectionSearchManagerWidget(QWidget):
         # 儲存搜尋歷史
         self._save_search_history()
 
+        self.result_table.setUpdatesEnabled(True)
         self.result_table.blockSignals(False)
         self.result_table.setSortingEnabled(True)  # 重新啟用排序
 

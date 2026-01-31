@@ -21,6 +21,7 @@ from src.crawler.thanks_handler import ThanksHandler
 from src.downloader.link_extractor import LinkExtractor
 from src.downloader.jd_integration import JDownloaderIntegration
 from src.downloader.clipboard_sender import ClipboardSender
+from src.downloader.smg_integration import SMGIntegration, extract_smg_code
 from src.database.db_manager import DatabaseManager
 from src.utils.logger import logger
 
@@ -37,8 +38,20 @@ class DLP01:
 
         # 初始化元件
         self.client = ForumClient(config_path)
+
+        # 關鍵字設定 (需要先讀取，供 PostParser 使用)
+        self.web_download_keywords = self.config['forum'].get('web_download_keywords', [])
+        self.smg_keywords = self.config['forum'].get('smg_keywords', [])
+
+        # 合併額外關鍵字 (網頁下載 + SMG)
+        extra_keywords = list(self.web_download_keywords) + list(self.smg_keywords)
+
         max_posts = self.config['scraper'].get('posts_per_section', 15)
-        self.parser = PostParser(self.config['forum']['title_filters'], max_posts=max_posts)
+        self.parser = PostParser(
+            self.config['forum']['title_filters'],
+            max_posts=max_posts,
+            extra_keywords=extra_keywords if extra_keywords else None
+        )
         self.thanks = ThanksHandler(self.client)
         self.extractor = LinkExtractor()
         self.jd = JDownloaderIntegration(
@@ -49,6 +62,13 @@ class DLP01:
             download_dir=self.config['paths']['download_dir']
         )
         self.db = DatabaseManager()
+
+        # SMG 整合
+        smg_config = self.config.get('smg', {})
+        self.smg = SMGIntegration(
+            exe_path=smg_config.get('exe_path'),
+            download_dir=smg_config.get('download_dir') or self.config['paths']['download_dir']
+        )
 
         # 發送方式: 'folderwatch' 或 'clipboard'
         self.send_method = 'folderwatch'  # 使用 folderwatch
@@ -68,7 +88,9 @@ class DLP01:
             'posts_new': 0,
             'thanks_sent': 0,
             'links_extracted': 0,
-            'repeated_downloads': 0
+            'repeated_downloads': 0,
+            'web_downloads': 0,
+            'smg_downloads': 0
         }
 
         # 大檔案清單 (超過限制需確認)
@@ -83,6 +105,29 @@ class DLP01:
         """檢查是否需要停止"""
         return self._stop_requested
 
+    def _get_download_type(self, title: str) -> str:
+        """
+        根據標題判斷下載類型
+
+        Returns:
+            'smg': 使用 SMG 下載
+            'web': 記錄到網頁下載表格
+            'jd': 使用 JDownloader (預設)
+        """
+        title_lower = title.lower()
+
+        # 檢查 SMG 關鍵字
+        for keyword in self.smg_keywords:
+            if keyword.lower() in title_lower:
+                return 'smg', keyword
+
+        # 檢查網頁下載關鍵字
+        for keyword in self.web_download_keywords:
+            if keyword.lower() in title_lower:
+                return 'web', keyword
+
+        return 'jd', None
+
     def run(self, dry_run: bool = False):
         """執行主流程"""
         self._stop_requested = False  # 重置停止旗標
@@ -90,6 +135,25 @@ class DLP01:
         logger.info("=" * 50)
         logger.info("DLP01 開始執行")
         logger.info("=" * 50)
+
+        # 顯示篩選關鍵字
+        if self.web_download_keywords:
+            logger.info(f"網頁下載關鍵字: {', '.join(self.web_download_keywords)}")
+        if self.smg_keywords:
+            logger.info(f"SMG 關鍵字: {', '.join(self.smg_keywords)}")
+
+        # 如果有設定 SMG 關鍵字，驗證 SMG 路徑
+        if self.smg_keywords:
+            valid, error_msg = self.smg.validate_path()
+            if not valid:
+                logger.error(f"SMG 路徑驗證失敗: {error_msg}")
+                logger.error("請至設定檢查 SMG 程式路徑，或移除 SMG 關鍵字")
+                return
+
+            # 確保 SMG 已啟動
+            if not dry_run and not self.smg.ensure_running():
+                logger.error("無法啟動 SMG，中止執行")
+                return
 
         # 檢查登入狀態
         if not self.client.check_login():
@@ -170,8 +234,11 @@ class DLP01:
         thread_id = post['thread_id']
         is_redownload = False
 
-        # 檢查是否已下載過 (有產生 crawljob 才算)
-        if self.db.is_downloaded(thread_id):
+        # 檢查是否已處理過（已下載或已感謝）
+        is_downloaded = self.db.is_downloaded(thread_id)
+        is_thanked = self.db.has_thanked(thread_id)
+
+        if is_downloaded or is_thanked:
             # 如果啟用重新下載已感謝帖子
             if self.re_download_thanked:
                 is_redownload = True
@@ -179,16 +246,15 @@ class DLP01:
                 logger.info(f"  [重新下載] {post['title'][:40]}... (第 {download_count + 1} 次)")
                 self.stats['repeated_downloads'] += 1
             else:
-                logger.debug(f"  跳過已下載: {post['title'][:30]}...")
+                skip_reason = "已下載" if is_downloaded else "已感謝"
+                logger.debug(f"  跳過{skip_reason}: {post['title'][:30]}...")
                 return
 
         # 檢查檔案大小
         file_size_mb = post.get('file_size_mb', 0)
         size_limit = getattr(self, 'size_limit_mb', 2048)
         if file_size_mb > size_limit:
-            size_gb = file_size_mb / 1024
-            logger.warning(f"  [大檔案] {post['title'][:40]}... ({size_gb:.1f}GB)")
-            # 記錄但跳過大檔案，稍後由使用者確認
+            # 超過大小限制，靜默跳過（不顯示日誌）
             self.large_files.append(post)
             return
 
@@ -220,29 +286,31 @@ class DLP01:
         if success:
             self.stats['thanks_sent'] += 1
 
-            # 重新獲取頁面並提取連結 (多次重試)
-            links_found = False
-            max_retries = 3
-            wait_times = [3, 5, 8]  # 每次重試等待時間遞增
+        # 無論感謝是否成功，都嘗試提取連結
+        # (因為帖子可能之前已被感謝過，內容已經可見)
+        links_found = False
+        max_retries = 3
+        wait_times = [3, 5, 8]  # 每次重試等待時間遞增
 
-            for attempt in range(max_retries):
-                wait_time = wait_times[attempt] if attempt < len(wait_times) else 8
-                logger.info(f"    等待 {wait_time} 秒後獲取頁面 (嘗試 {attempt + 1}/{max_retries})")
-                time.sleep(wait_time)
+        for attempt in range(max_retries):
+            wait_time = wait_times[attempt] if attempt < len(wait_times) else 8
+            logger.info(f"    等待 {wait_time} 秒後獲取頁面 (嘗試 {attempt + 1}/{max_retries})")
+            time.sleep(wait_time)
 
-                html = self.client.get_thread_page(thread_id)
-                if html:
-                    result = self.extractor.extract_from_html(html)
-                    if result['links']:
-                        # 找到連結，進行下載
-                        self._extract_and_download(post_id, post['title'], html, result, thread_id)
-                        links_found = True
-                        break
-                    else:
-                        logger.info(f"    第 {attempt + 1} 次嘗試未找到連結，繼續重試...")
+            html = self.client.get_thread_page(thread_id)
+            if html:
+                result = self.extractor.extract_from_html(html)
+                if result['links']:
+                    # 找到連結，進行下載
+                    self._extract_and_download(post_id, post['title'], html, result, thread_id,
+                                               post_url=post.get('post_url'))
+                    links_found = True
+                    break
+                else:
+                    logger.info(f"    第 {attempt + 1} 次嘗試未找到連結，繼續重試...")
 
-            if not links_found:
-                logger.warning(f"    {max_retries} 次嘗試後仍未找到下載連結")
+        if not links_found:
+            logger.warning(f"    {max_retries} 次嘗試後仍未找到下載連結")
 
     def _process_unthanked_posts(self, dry_run: bool):
         """處理之前未成功感謝的帖子"""
@@ -265,20 +333,51 @@ class DLP01:
 
             if success:
                 self.stats['thanks_sent'] += 1
-                time.sleep(2)
-                html = self.client.get_thread_page(post['thread_id'])
-                if html:
-                    self._extract_and_download(post['id'], post['title'], html,
-                                               thread_id=post['thread_id'])
+
+            # 無論感謝是否成功，都嘗試提取連結
+            time.sleep(2)
+            html = self.client.get_thread_page(post['thread_id'])
+            if html:
+                self._extract_and_download(post['id'], post['title'], html,
+                                           thread_id=post['thread_id'],
+                                           post_url=post.get('post_url'))
 
     def _extract_and_download(self, post_id: int, title: str, html: str,
-                               result: Dict = None, thread_id: str = None):
-        """提取連結並送到 JDownloader"""
+                               result: Dict = None, thread_id: str = None,
+                               post_url: str = None):
+        """提取連結並根據類型分發處理"""
         if result is None:
             result = self.extractor.extract_from_html(html)
         links = result['links']
         password = result['password']
         archive_names = result.get('archive_names', [])
+
+        # 判斷下載類型
+        download_type, matched_keyword = self._get_download_type(title)
+
+        # SMG 類型：嘗試提取 SMG 編碼
+        if download_type == 'smg':
+            smg_code = extract_smg_code(html)
+            if smg_code:
+                logger.info(f"    [SMG] 找到 SMG 編碼，發送到 SMG 下載器")
+                if self.smg.send_download_with_retry(smg_code):
+                    self.stats['smg_downloads'] += 1
+                    # 記錄 SMG 下載到資料庫
+                    self.db.add_smg_download(
+                        thread_id=thread_id,
+                        title=title,
+                        post_url=post_url or '',
+                        keyword=matched_keyword or '',
+                        smg_code=smg_code,
+                        password=password
+                    )
+                    logger.info(f"    [SMG] 任務已發送並記錄")
+                else:
+                    logger.error(f"    [SMG] 發送失敗")
+                return
+            else:
+                logger.warning(f"    [SMG] 未找到 SMG 編碼，嘗試一般連結提取")
+                # 繼續嘗試一般連結提取
 
         if not links:
             logger.warning(f"    未找到下載連結")
@@ -305,7 +404,22 @@ class DLP01:
             )
             self.db.mark_sent_to_jd(download_id, title)
 
-        # 發送到 JDownloader
+        # 網頁下載類型：記錄到 web_downloads 表格
+        if download_type == 'web':
+            for link in links:
+                self.db.add_web_download(
+                    thread_id=thread_id or '',
+                    title=title,
+                    post_url=post_url or f"thread-{thread_id}-1-1.html",
+                    keyword=matched_keyword,
+                    download_url=link['url'],
+                    password=password
+                )
+            self.stats['web_downloads'] += len(links)
+            logger.info(f"    [網頁下載] 已記錄 {len(links)} 個連結到網頁下載表格")
+            return
+
+        # JDownloader 類型：發送到 JDownloader
         if self.send_method == 'clipboard':
             # 使用剪貼簿方式
             self.clipboard.send_links(links, title, password)
@@ -332,6 +446,10 @@ class DLP01:
         logger.info(f"提取連結: {self.stats['links_extracted']}")
         if self.stats['repeated_downloads'] > 0:
             logger.info(f"重複下載: {self.stats['repeated_downloads']}")
+        if self.stats['web_downloads'] > 0:
+            logger.info(f"網頁下載: {self.stats['web_downloads']}")
+        if self.stats['smg_downloads'] > 0:
+            logger.info(f"SMG 下載: {self.stats['smg_downloads']}")
 
         # 顯示大檔案清單
         if self.large_files:

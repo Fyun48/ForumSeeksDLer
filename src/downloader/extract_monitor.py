@@ -92,8 +92,8 @@ class ExtractMonitor:
         # 訊號 (用於 GUI 整合)
         self.signals = ExtractSignals()
 
-        # 失敗追蹤器 (用於自動停止邏輯)
-        self.failure_tracker = FailureTracker(max_failures=5)
+        # 失敗追蹤器 (每個檔案只嘗試一次)
+        self.failure_tracker = FailureTracker(max_failures=1)
 
         # 自動停止相關
         self._idle_timeout = 6  # 閒置超時秒數
@@ -758,16 +758,23 @@ class ExtractMonitor:
                 logger.info(f"解壓完成 (無密碼): {archive_path.name}")
                 return (True, None)
             else:
-                logger.error(f"解壓失敗: {archive_path.name}")
-                if tried_passwords:
-                    logger.warning(f"  已嘗試 {len(tried_passwords)} 個密碼均失敗")
-                    logger.warning(f"  嘗試過的密碼: {', '.join(tried_passwords[:5])}...")
                 # 檢查錯誤類型
                 stderr = result.stderr.lower() if result.stderr else ''
-                if 'password' in stderr or 'encrypted' in stderr:
-                    logger.warning(f"  可能是密碼錯誤，請檢查密碼記錄")
+                is_password_error = 'password' in stderr or 'encrypted' in stderr
+
+                if tried_passwords and is_password_error:
+                    # 密碼錯誤，回寫資料庫
+                    logger.warning(f"解壓失敗 (密碼錯誤): {archive_path.name}")
+                    try:
+                        from ..database.db_manager import DatabaseManager
+                        db = DatabaseManager()
+                        db.mark_password_error(archive_path.name, f"已嘗試 {len(tried_passwords)} 個密碼均失敗")
+                    except Exception as e:
+                        logger.debug(f"標記密碼錯誤失敗: {e}")
                 elif 'corrupt' in stderr or 'damage' in stderr:
-                    logger.warning(f"  壓縮檔可能已損壞")
+                    logger.warning(f"解壓失敗 (檔案損壞): {archive_path.name}")
+                else:
+                    logger.warning(f"解壓失敗: {archive_path.name}")
                 return (False, None)
 
         except subprocess.TimeoutExpired:
@@ -892,10 +899,18 @@ class ExtractMonitor:
 
     def find_completed_archives(self) -> List[Path]:
         """找出已下載完成的壓縮檔"""
+        # 使用 set 避免重複（同一檔案可能匹配多個 pattern）
+        seen_paths = set()
         archives = []
 
         for pattern in self.ARCHIVE_PATTERNS:
             for filepath in self.download_dir.glob(pattern):
+                # 避免重複處理
+                filepath_str = str(filepath)
+                if filepath_str in seen_paths:
+                    continue
+                seen_paths.add(filepath_str)
+
                 # 跳過分卷的非第一卷
                 name = filepath.name.lower()
                 if '.part' in name and not (name.endswith('.part01.rar') or
@@ -904,7 +919,7 @@ class ExtractMonitor:
                     continue
 
                 # 跳過已處理的
-                if str(filepath) in self.processed_files:
+                if filepath_str in self.processed_files:
                     continue
 
                 # 檢查是否還在下載中
@@ -1002,40 +1017,80 @@ class ExtractMonitor:
             self.password_mappings[filename_pattern] = passwords
 
     def _find_passwords_for_archive(self, archive_path: Path) -> List[str]:
-        """根據壓縮檔名稱尋找對應的密碼列表"""
+        """
+        根據壓縮檔名稱尋找對應的密碼列表
+
+        匹配優先順序：
+        1. 精確匹配 (clean_name == pattern)
+        2. 透過 JD 記錄精確匹配
+        3. 子字串匹配 (但只接受較長的一方包含較短的，且長度差異不超過 50%)
+        """
         archive_name = archive_path.stem.lower()
         clean_name = self._get_clean_archive_name(archive_path).lower()
 
-        logger.debug(f"嘗試匹配密碼: {archive_path.name} -> clean: {clean_name}")
+        # 取得純中文+字母數字版本 (用於比對)
+        clean_name_chars = re.sub(r'[^\u4e00-\u9fff\w]', '', clean_name)
 
-        # 從 JDownloader 記錄查找
+        # ===== 階段 1: 精確匹配 =====
+        for pattern, passwords in self.password_mappings.items():
+            pattern_lower = pattern.lower()
+            if clean_name == pattern_lower:
+                logger.info(f"密碼精確匹配: {archive_path.name}")
+                return passwords if isinstance(passwords, list) else [passwords]
+
+        # ===== 階段 2: 透過 JD 記錄匹配 =====
         package_name = self._find_package_from_jd(archive_path.name)
         if package_name:
             package_lower = package_name.lower()
+            # 先嘗試精確匹配
             for pattern, passwords in self.password_mappings.items():
                 pattern_lower = pattern.lower()
-                if pattern_lower in package_lower or package_lower in pattern_lower:
+                if pattern_lower == package_lower:
+                    logger.info(f"透過 JD 精確匹配密碼: {archive_path.name}")
+                    return passwords if isinstance(passwords, list) else [passwords]
+            # 再嘗試較嚴格的子字串匹配
+            for pattern, passwords in self.password_mappings.items():
+                pattern_lower = pattern.lower()
+                if self._is_similar_match(pattern_lower, package_lower):
                     logger.info(f"透過 JD 匹配密碼: {archive_path.name}")
                     return passwords if isinstance(passwords, list) else [passwords]
 
-        # 直接用檔名匹配
-        clean_name_chars = re.sub(r'[^\u4e00-\u9fff\w]', '', clean_name)
-
+        # ===== 階段 3: 較嚴格的子字串匹配 =====
         for pattern, passwords in self.password_mappings.items():
             pattern_lower = pattern.lower()
             pattern_chars = re.sub(r'[^\u4e00-\u9fff\w]', '', pattern_lower)
 
-            if clean_name == pattern_lower:
+            if self._is_similar_match(pattern_lower, clean_name):
                 return passwords if isinstance(passwords, list) else [passwords]
 
-            if pattern_lower in clean_name or clean_name in pattern_lower:
-                return passwords if isinstance(passwords, list) else [passwords]
-
+            # 純字元比對 (需要長度相似)
             if clean_name_chars and pattern_chars:
-                if pattern_chars in clean_name_chars or clean_name_chars in pattern_chars:
+                if self._is_similar_match(pattern_chars, clean_name_chars):
                     return passwords if isinstance(passwords, list) else [passwords]
 
         return []
+
+    def _is_similar_match(self, str1: str, str2: str) -> bool:
+        """
+        判斷兩個字串是否為相似匹配
+
+        規則：
+        - 如果一個字串包含另一個，且長度差異不超過 50%，則視為匹配
+        - 這樣可以避免太短的字串匹配到太長的字串
+        """
+        if not str1 or not str2:
+            return False
+
+        len1, len2 = len(str1), len(str2)
+        min_len = min(len1, len2)
+        max_len = max(len1, len2)
+
+        # 長度差異不能超過 50%
+        if max_len > min_len * 1.5:
+            return False
+
+        # 一方完全包含另一方
+        return str1 in str2 or str2 in str1
 
     def _refresh_jd_cache(self, force: bool = False):
         """刷新 JDownloader 檔名快取"""
@@ -1053,6 +1108,96 @@ class ExtractMonitor:
             self._jd_cache_time = datetime.now()
         except Exception as e:
             logger.debug(f"刷新 JD 快取失敗: {e}")
+
+    def _sync_jd_filenames_to_db(self, db_manager=None) -> int:
+        """
+        從 JD 下載歷史同步實體檔名到資料庫
+
+        Args:
+            db_manager: 資料庫管理器
+
+        Returns:
+            更新的記錄數量
+        """
+        if not self.jd_path:
+            return 0
+
+        try:
+            from .jd_history_reader import JDHistoryReader
+            reader = JDHistoryReader(self.jd_path)
+            completed = reader.get_completed_downloads()
+
+            if not completed:
+                return 0
+
+            if db_manager is None:
+                from ..database.db_manager import DatabaseManager
+                db_manager = DatabaseManager()
+
+            updated_count = 0
+            for record in completed:
+                pkg_name = record.get('package_name', '')
+                file_name = record.get('file_name', '')
+
+                if pkg_name and file_name:
+                    count = db_manager.update_jd_actual_filename(pkg_name, file_name)
+                    if count > 0:
+                        logger.info(f"同步實體檔名: {file_name}")
+                        updated_count += count
+                        # 同時更新密碼映射表，使用實際檔名
+                        self._add_jd_filename_to_mapping(file_name, pkg_name, db_manager)
+
+            return updated_count
+
+        except Exception as e:
+            logger.warning(f"同步 JD 檔名失敗: {e}")
+            return 0
+
+    def _add_jd_filename_to_mapping(self, jd_filename: str, package_name: str, db_manager=None):
+        """
+        將 JD 實際檔名加入密碼映射表
+
+        Args:
+            jd_filename: JD 實際下載的檔名
+            package_name: JD 套件名稱
+            db_manager: 資料庫管理器
+        """
+        try:
+            if db_manager is None:
+                from ..database.db_manager import DatabaseManager
+                db_manager = DatabaseManager()
+
+            # 查詢這個檔案對應的密碼
+            records = db_manager.get_passwords_with_titles()
+            for record in records:
+                jd_actual = (record.get('jd_actual_filename') or '').lower()
+                pkg = (record.get('package_name') or '').lower()
+                pwd = record.get('password', '')
+
+                if not pwd:
+                    continue
+
+                # 匹配 jd_actual_filename 或 package_name
+                if (jd_actual and jd_filename.lower() in jd_actual) or \
+                   (pkg and package_name.lower() in pkg):
+                    # 加入映射
+                    clean_name = jd_filename.lower()
+                    for ext in self.ARCHIVE_EXTENSIONS:
+                        if clean_name.endswith(ext):
+                            clean_name = clean_name[:-len(ext)]
+                            break
+                    for suffix in ['.part01', '.part1', '.part001']:
+                        if clean_name.endswith(suffix):
+                            clean_name = clean_name[:-len(suffix)]
+                            break
+
+                    passwords = [p.strip() for p in pwd.split('|') if p.strip()]
+                    if passwords and clean_name:
+                        self.password_mappings[clean_name] = passwords
+                    break
+
+        except Exception as e:
+            logger.debug(f"加入 JD 檔名到映射表失敗: {e}")
 
     def _find_package_from_jd(self, archive_name: str) -> Optional[str]:
         """從 JDownloader 記錄中查找套件名稱"""
@@ -1162,9 +1307,13 @@ class ExtractMonitor:
             'stop_reason': None
         }
 
-        logger.info(f"開始監控下載目錄: {self.download_dir}")
-        logger.info(f"解壓目錄: {self.extract_dir}")
-        logger.info(f"檢查間隔: {interval} 秒, 閒置超時: {self._idle_timeout} 秒")
+        # 先從 JD 同步實體檔名到資料庫
+        logger.info("正在同步 JDownloader 實體檔名...")
+        synced = self._sync_jd_filenames_to_db(db_manager)
+        if synced > 0:
+            logger.info(f"已同步 {synced} 筆實體檔名")
+
+        logger.info(f"開始解壓監控: {self.download_dir}")
 
         while self._is_monitoring and not self._stop_requested:
             try:
@@ -1206,15 +1355,13 @@ class ExtractMonitor:
                             self._exit_idle_state()
                         else:
                             stats['total_failed'] += 1
-                            # 記錄失敗
-                            is_blacklisted = self.failure_tracker.record_failure(str(archive))
-                            if is_blacklisted:
-                                stats['blacklisted_files'].append(archive.name)
-                                self.signals.file_blacklisted.emit(
-                                    archive.name,
-                                    self.failure_tracker.get_failure_count(str(archive))
-                                )
-                                logger.warning(f"檔案已達失敗上限，放棄處理: {archive.name}")
+                            # 記錄失敗（每檔只試一次，失敗即放棄）
+                            self.failure_tracker.record_failure(str(archive))
+                            stats['blacklisted_files'].append(archive.name)
+                            self.signals.file_blacklisted.emit(
+                                archive.name,
+                                self.failure_tracker.get_failure_count(str(archive))
+                            )
 
                 time.sleep(interval)
 
@@ -1235,10 +1382,18 @@ class ExtractMonitor:
 
     def _find_processable_archives(self) -> List[Path]:
         """找出可處理的壓縮檔（排除已處理和已放棄的）"""
+        # 使用 set 避免重複（同一檔案可能匹配多個 pattern）
+        seen_paths = set()
         archives = []
 
         for pattern in self.ARCHIVE_PATTERNS:
             for filepath in self.download_dir.glob(pattern):
+                # 避免重複處理
+                filepath_str = str(filepath)
+                if filepath_str in seen_paths:
+                    continue
+                seen_paths.add(filepath_str)
+
                 # 跳過分卷的非第一卷
                 name = filepath.name.lower()
                 if '.part' in name and not (name.endswith('.part01.rar') or
@@ -1247,11 +1402,11 @@ class ExtractMonitor:
                     continue
 
                 # 跳過已處理的
-                if str(filepath) in self.processed_files:
+                if filepath_str in self.processed_files:
                     continue
 
                 # 跳過已放棄的
-                if self.failure_tracker.is_blacklisted(str(filepath)):
+                if self.failure_tracker.is_blacklisted(filepath_str):
                     continue
 
                 # 檢查是否還在下載中

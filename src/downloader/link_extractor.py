@@ -490,6 +490,39 @@ class LinkExtractor:
                 if len(passwords) >= MAX_PASSWORDS:
                     break
 
+        # ===== 階段 3: 處理隱藏內容標記後的密碼 =====
+        # 格式: 解壓密碼: → [隱藏內容提示] → 實際密碼
+        if len(passwords) < MAX_PASSWORDS:
+            lines = text.split('\n')
+            for i, line in enumerate(lines):
+                # 找到密碼標籤行
+                if re.search(r'(?:解[壓压])?密[碼码]\s*[：:]', line, re.IGNORECASE):
+                    # 從下一行開始找密碼
+                    for j in range(i + 1, min(i + 5, len(lines))):  # 最多看後面 4 行
+                        next_line = lines[j].strip()
+                        if not next_line:
+                            continue
+                        # 跳過隱藏內容標記行
+                        is_marker = False
+                        for marker in self.HIDDEN_CONTENT_MARKERS:
+                            if re.search(marker, next_line):
+                                is_marker = True
+                                break
+                        if is_marker:
+                            continue
+                        # 跳過明顯不是密碼的行（太長或包含中文說明）
+                        if len(next_line) > 80 or re.search(r'[，。！？、]', next_line):
+                            continue
+                        # 嘗試提取這行作為密碼
+                        # 移除可能的括號
+                        potential_pwd = re.sub(r'^[\[\(【\[]+|[\]\)】\]]+$', '', next_line).strip()
+                        if potential_pwd and is_valid_password(potential_pwd):
+                            if add_password(potential_pwd):
+                                break
+                        break  # 只檢查第一個非標記行
+                if len(passwords) >= MAX_PASSWORDS:
+                    break
+
         # 返回密碼（用 | 分隔）或 None
         if passwords:
             logger.debug(f"提取到 {len(passwords)} 個密碼: {passwords}")

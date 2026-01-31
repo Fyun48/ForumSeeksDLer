@@ -8,9 +8,24 @@ from ..utils.logger import logger
 class PostParser:
     """帖子解析器"""
 
-    def __init__(self, title_filters: List[str], max_posts: int = 15):
+    def __init__(self, title_filters: List[str], max_posts: int = 15,
+                 extra_keywords: List[str] = None):
+        """
+        初始化帖子解析器
+
+        Args:
+            title_filters: 主要篩選關鍵字 (如 MG@JD, Transfer@HTTP)
+            max_posts: 每版區最大檢查帖子數
+            extra_keywords: 額外關鍵字 (如網頁下載關鍵字、SMG 關鍵字)
+        """
         self.title_filters = title_filters
         self.max_posts = max_posts
+        # 合併所有關鍵字用於篩選
+        self.all_keywords = list(title_filters)
+        if extra_keywords:
+            for kw in extra_keywords:
+                if kw and kw not in self.all_keywords:
+                    self.all_keywords.append(kw)
 
     def parse_forum_list(self, html: str, forum_section: str) -> List[Dict]:
         """解析版區帖子列表"""
@@ -72,27 +87,38 @@ class PostParser:
 
     def _extract_file_size(self, title: str) -> float:
         """從標題中提取檔案大小 (MB)"""
-        # 尋找 [xxx@數字MB] 或 [xxx@數字GB] 格式
-        # 例如: [MEGA@IE@163.4MB] 或 [Gofile@HTTP@1.2GB]
-        match = re.search(r'\[.*?@([\d.]+)\s*(MB|GB|TB)\s*\]', title, re.IGNORECASE)
+        # 尋找多種格式:
+        # - [xxx@數字MB] 或 [xxx@數字GB] (有 B)
+        # - [xxx@數字M] 或 [xxx@數字G] (沒有 B)
+        # - @1.7G 或 @1.7GB (標題末尾)
+        # 例如: [MEGA@IE@163.4MB], [Gofile@HTTP@1.2GB], [MEGA@IE@1.7G]
+
+        # 優先匹配方括號內的格式
+        match = re.search(r'\[.*?@([\d.]+)\s*(M|G|T)B?\s*\]', title, re.IGNORECASE)
+        if not match:
+            # 嘗試匹配標題末尾的格式 (如 @1.7G)
+            match = re.search(r'@([\d.]+)\s*(M|G|T)B?\s*(?:\]|$)', title, re.IGNORECASE)
+
         if match:
             size = float(match.group(1))
             unit = match.group(2).upper()
-            if unit == 'GB':
+            if unit == 'G':
                 size *= 1024
-            elif unit == 'TB':
+            elif unit == 'T':
                 size *= 1024 * 1024
             return size
         return 0
 
     def _matches_filter(self, title: str) -> bool:
-        """檢查標題是否符合篩選條件"""
-        return any(f.lower() in title.lower() for f in self.title_filters)
+        """檢查標題是否符合篩選條件 (包含主篩選關鍵字或額外關鍵字)"""
+        return any(f.lower() in title.lower() for f in self.all_keywords)
 
     def _detect_host_type(self, title: str) -> str:
         """從標題偵測檔案主機類型"""
         title_lower = title.lower()
-        if 'mg@jd' in title_lower or 'mega' in title_lower:
+        if 'gd@' in title_lower or '@gd' in title_lower or 'google' in title_lower:
+            return 'GoogleDrive'
+        elif 'mg@jd' in title_lower or 'mega' in title_lower:
             return 'MEGA'
         elif 'transfer' in title_lower:
             return 'Transfer'
@@ -108,9 +134,11 @@ class ThreadContentParser:
 
     # 常見的下載連結正則
     LINK_PATTERNS = [
+        (r'https?://drive\.google\.com/[^\s<>"\']+', 'GoogleDrive'),
         (r'https?://mega\.nz/[^\s<>"\']+', 'MEGA'),
         (r'https?://gofile\.io/d/[^\s<>"\']+', 'Gofile'),
         (r'https?://transfer\.sh/[^\s<>"\']+', 'Transfer'),
+        (r'https?://transfer\.it/[^\s<>"\']+', 'Transfer'),
         (r'https?://katfile\.com/[^\s<>"\']+', 'Katfile'),
         (r'https?://rosefile\.net/[^\s<>"\']+', 'Rosefile'),
         (r'https?://rapidgator\.net/[^\s<>"\']+', 'Rapidgator'),

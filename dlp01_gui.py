@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from src.gui.styles import apply_nord_theme
+from src.version import APP_NAME, APP_DISPLAY_NAME, VERSION
 
 
 def main():
@@ -27,9 +28,10 @@ def main():
     app = QApplication(sys.argv)
 
     # 設定應用程式資訊
-    app.setApplicationName("DLP01")
-    app.setApplicationDisplayName("DLP01 - 論壇自動下載程式")
-    app.setOrganizationName("DLP01")
+    app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_DISPLAY_NAME)
+    app.setOrganizationName(APP_NAME)
+    app.setApplicationVersion(VERSION)
 
     # 設定預設字型 (避免 MS Sans Serif 警告)
     font = QFont("Microsoft JhengHei UI", 9)  # 微軟正黑體

@@ -100,6 +100,7 @@ class DatabaseManager:
                 ('first_download_time', 'DATETIME'),
                 ('jd_complete_time', 'DATETIME'),
                 ('jd_actual_filename', 'TEXT'),  # JDownloader 實際下載的檔名
+                ('password_error', 'BOOLEAN DEFAULT NULL'),  # 密碼錯誤標記
             ]
 
             for column_name, column_type in new_columns:
@@ -825,14 +826,41 @@ class DatabaseManager:
             cursor = conn.cursor()
             now = datetime.now().isoformat()
 
-            # 使用套件名稱匹配，更新實際檔名並標記完成
-            # 只更新尚未設定實際檔名的記錄
+            # 階段 1: 精確匹配 jd_package_name
+            cursor.execute('''
+                UPDATE downloads
+                SET jd_actual_filename = ?,
+                    jd_complete_time = COALESCE(jd_complete_time, ?),
+                    download_status = 'completed'
+                WHERE jd_package_name = ?
+                AND (jd_actual_filename IS NULL OR jd_actual_filename = '')
+            ''', (actual_filename, now, package_name))
+
+            if cursor.rowcount > 0:
+                return cursor.rowcount
+
+            # 階段 2: 模糊匹配 jd_package_name (LIKE)
             cursor.execute('''
                 UPDATE downloads
                 SET jd_actual_filename = ?,
                     jd_complete_time = COALESCE(jd_complete_time, ?),
                     download_status = 'completed'
                 WHERE jd_package_name LIKE ?
+                AND (jd_actual_filename IS NULL OR jd_actual_filename = '')
+            ''', (actual_filename, now, f'%{package_name}%'))
+
+            if cursor.rowcount > 0:
+                return cursor.rowcount
+
+            # 階段 3: 透過 post 標題匹配
+            cursor.execute('''
+                UPDATE downloads
+                SET jd_actual_filename = ?,
+                    jd_complete_time = COALESCE(jd_complete_time, ?),
+                    download_status = 'completed'
+                WHERE post_id IN (
+                    SELECT id FROM posts WHERE title LIKE ?
+                )
                 AND (jd_actual_filename IS NULL OR jd_actual_filename = '')
             ''', (actual_filename, now, f'%{package_name}%'))
 
@@ -865,6 +893,41 @@ class DatabaseManager:
                 WHERE jd_package_name LIKE ?
                 AND (archive_filename IS NULL OR archive_filename = '')
             ''', (filename, f'%{package_name}%'))
+
+            return cursor.rowcount
+
+    def mark_password_error(self, archive_name: str, error_message: str = None) -> int:
+        """
+        標記密碼錯誤
+
+        Args:
+            archive_name: 壓縮檔名稱
+            error_message: 錯誤訊息
+
+        Returns:
+            更新的記錄數量
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+
+            # 清理檔案名稱
+            clean_name = archive_name.lower()
+            for ext in ['.rar', '.zip', '.7z']:
+                if clean_name.endswith(ext):
+                    clean_name = clean_name[:-len(ext)]
+                    break
+            for suffix in ['.part01', '.part1', '.part001']:
+                if clean_name.endswith(suffix):
+                    clean_name = clean_name[:-len(suffix)]
+                    break
+
+            # 標記密碼錯誤
+            cursor.execute('''
+                UPDATE downloads
+                SET password_error = 1, error_message = ?
+                WHERE (jd_package_name LIKE ? OR jd_actual_filename LIKE ? OR archive_filename LIKE ?)
+                AND password_error IS NULL
+            ''', (error_message, f'%{clean_name}%', f'%{clean_name}%', f'%{clean_name}%'))
 
             return cursor.rowcount
 

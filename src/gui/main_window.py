@@ -79,6 +79,9 @@ class MainWindow(QMainWindow):
         # 設定通知管理器的狀態列
         self.notification_manager.set_statusbar(self.statusBar())
 
+        # 延遲 3 秒後檢查更新 (讓視窗先完成載入)
+        QTimer.singleShot(3000, self._check_for_updates_startup)
+
     def _load_config(self) -> dict:
         """載入設定檔"""
         try:
@@ -98,7 +101,8 @@ class MainWindow(QMainWindow):
 
     def _update_window_title(self):
         """更新視窗標題"""
-        self.setWindowTitle(f"DLP01 - 論壇自動下載程式 【{self.current_profile}】")
+        from ..version import get_window_title
+        self.setWindowTitle(get_window_title(self.current_profile))
 
     def _init_ui(self):
         """初始化介面"""
@@ -243,6 +247,12 @@ class MainWindow(QMainWindow):
 
         # 說明選單
         help_menu = menubar.addMenu("說明")
+
+        check_update_action = QAction("檢查更新", self)
+        check_update_action.triggered.connect(self._check_for_updates_manual)
+        help_menu.addAction(check_update_action)
+
+        help_menu.addSeparator()
 
         about_action = QAction("關於", self)
         about_action.triggered.connect(self._show_about)
@@ -2182,14 +2192,73 @@ class MainWindow(QMainWindow):
 
     def _show_about(self):
         """顯示關於對話框"""
+        from ..version import get_about_text, APP_NAME
         QMessageBox.about(
             self,
-            "關於 DLP01",
-            "DLP01 - 論壇自動下載程式\n\n"
-            "自動爬取 fastzone.org 論壇，\n"
-            "篩選帖子並透過 JDownloader 下載。\n\n"
-            "版本: 1.0.0"
+            f"關於 {APP_NAME}",
+            get_about_text()
         )
+
+    def _check_for_updates_startup(self):
+        """啟動時背景檢查更新"""
+        from .update_dialog import UpdateCheckWorker, UpdateSettings
+
+        settings = UpdateSettings()
+        if not settings.is_auto_check_enabled():
+            return
+
+        self._update_worker = UpdateCheckWorker(use_cache=True)
+        self._update_worker.finished.connect(self._on_update_check_finished)
+        self._update_worker.start()
+
+    def _check_for_updates_manual(self):
+        """手動檢查更新"""
+        from .update_dialog import UpdateCheckWorker
+
+        self.statusBar().showMessage("正在檢查更新...")
+
+        self._update_worker = UpdateCheckWorker(use_cache=False)
+        self._update_worker.finished.connect(
+            lambda result: self._on_update_check_finished(result, show_no_update=True)
+        )
+        self._update_worker.error.connect(
+            lambda err: QMessageBox.warning(self, "檢查更新失敗", f"無法檢查更新:\n{err}")
+        )
+        self._update_worker.start()
+
+    def _on_update_check_finished(self, result, show_no_update: bool = False):
+        """更新檢查完成"""
+        from .update_dialog import UpdateDialog, UpdateSettings
+
+        self.statusBar().clearMessage()
+
+        if result.has_error:
+            if show_no_update:
+                QMessageBox.warning(self, "檢查更新", f"檢查更新時發生錯誤:\n{result.error}")
+            return
+
+        if result.available:
+            # 檢查是否跳過此版本
+            settings = UpdateSettings()
+            if not show_no_update and not settings.should_show_update(result.latest_version):
+                return
+
+            # 顯示更新對話框
+            dialog = UpdateDialog(result, self)
+            dialog.exec()
+
+            # 儲存跳過的版本
+            skipped = dialog.get_skipped_version()
+            if skipped:
+                settings.set_skipped_version(skipped)
+        else:
+            if show_no_update:
+                from ..version import VERSION
+                QMessageBox.information(
+                    self,
+                    "檢查更新",
+                    f"您使用的已是最新版本。\n\n目前版本: v{VERSION}"
+                )
 
     def _refresh_history(self):
         """重新整理下載歷史"""

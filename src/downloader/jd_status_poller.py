@@ -125,11 +125,8 @@ class JDStatusPoller(QObject):
             self._jd_cache = jd_history
             self._cache_time = datetime.now()
 
-            logger.debug(f"JD 輪詢: 讀取到 {len(jd_history)} 筆 JD 記錄")
-
             # 找出已完成的下載
             completed = self.jd_reader.get_completed_downloads()
-            logger.debug(f"JD 輪詢: 已完成下載 {len(completed)} 筆")
 
             # 比對預期檔案 (使用模糊匹配)
             newly_completed = []
@@ -144,14 +141,24 @@ class JDStatusPoller(QObject):
                     if record.get('status') == 'FINISHED':
                         self._completed_packages.add(matched_pkg)
                         newly_completed.append(record)
+
+                        # 直接更新資料庫，儲存實際檔名
+                        if jd_file_name:
+                            try:
+                                from ..database.db_manager import DatabaseManager
+                                db = DatabaseManager()
+                                updated = db.update_jd_actual_filename(jd_pkg_name, jd_file_name)
+                                logger.info(f"已儲存實際檔名: {jd_file_name} (更新 {updated} 筆)")
+                            except Exception as e:
+                                logger.warning(f"儲存實際檔名失敗: {e}")
+
                         self.file_complete.emit(jd_pkg_name, jd_file_name)
-                        logger.info(f"偵測到下載完成: {jd_pkg_name} (匹配: {matched_pkg})")
+                        logger.info(f"偵測到下載完成: {jd_pkg_name} -> {jd_file_name}")
 
             # 發送進度更新
             total = len(self._expected_packages)
             completed_count = len(self._completed_packages)
             self.progress_updated.emit(completed_count, total)
-            logger.debug(f"JD 輪詢進度: {completed_count}/{total}")
 
             # 檢查是否全部完成
             if completed_count == total and total > 0:

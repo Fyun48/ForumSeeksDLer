@@ -422,6 +422,7 @@ class SectionSearchWidget(QWidget):
     def _display_results(self, results: List[Dict]):
         """顯示搜尋結果"""
         self.result_table.blockSignals(True)
+        self.result_table.setUpdatesEnabled(False)
         self.result_table.setRowCount(len(results))
 
         for row, result in enumerate(results):
@@ -447,6 +448,7 @@ class SectionSearchWidget(QWidget):
             # TID
             self.result_table.setItem(row, 5, QTableWidgetItem(result.get('tid', '')))
 
+        self.result_table.setUpdatesEnabled(True)
         self.result_table.blockSignals(False)
         self._update_result_count()
 

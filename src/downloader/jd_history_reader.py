@@ -202,6 +202,108 @@ class JDHistoryReader:
         history = self.read_download_history()
         return [r for r in history if r.get('status') == 'FINISHED']
 
+    def get_latest_linkgrabber_list(self) -> Optional[Path]:
+        """取得最新的 linkgrabber/linkcollector zip 檔案"""
+        if not self.cfg_path:
+            return None
+
+        # JDownloader 可能使用 linkcollectorlist 或 linkgrabberlist
+        patterns = ['linkcollectorlist*.zip', 'linkgrabberlist*.zip']
+
+        for pattern in patterns:
+            files = list(self.cfg_path.glob(pattern))
+            if files:
+                files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                return files[0]
+
+        return None
+
+    def read_linkgrabber_list(self) -> List[Dict]:
+        """
+        讀取 linkgrabber 列表（JD 解析後但尚未開始下載的連結）
+
+        Returns:
+            包含連結資訊的列表，每筆記錄包含:
+            - package_name: 套件名稱
+            - file_name: JD 解析出的檔名
+            - url: 原始連結
+            - status: 狀態 (ONLINE, OFFLINE, UNKNOWN 等)
+            - size: 檔案大小
+        """
+        linkgrabber_list = self.get_latest_linkgrabber_list()
+        if not linkgrabber_list:
+            logger.debug("找不到 JDownloader linkgrabber 列表")
+            return []
+
+        results = []
+
+        try:
+            with zipfile.ZipFile(linkgrabber_list, 'r') as zf:
+                names = zf.namelist()
+
+                # 找出所有 package (不含底線的檔案，排除 extraInfo)
+                packages = [n for n in names if '_' not in n and n != 'extraInfo']
+
+                for pkg_name in packages:
+                    try:
+                        pkg_data = json.loads(zf.read(pkg_name).decode('utf-8'))
+                        package_name = pkg_data.get('name', '')
+
+                        # 找出這個 package 的所有 links
+                        link_files = [n for n in names if n.startswith(f"{pkg_name}_")]
+
+                        for link_file in link_files:
+                            try:
+                                link_data = json.loads(zf.read(link_file).decode('utf-8'))
+
+                                # linkcollector 結構: link_data.downloadLink 包含實際連結資訊
+                                download_link = link_data.get('downloadLink', {})
+                                if download_link:
+                                    # 從 downloadLink 取得資訊
+                                    properties = download_link.get('properties', {})
+                                    file_name = (
+                                        properties.get('FINAL_FILENAME') or
+                                        download_link.get('name', '')
+                                    )
+                                    url = download_link.get('url', '')
+                                    status = download_link.get('availablestatus', 'UNKNOWN')
+                                    size = download_link.get('size', 0)
+                                else:
+                                    # 舊格式: 直接在 link_data 中
+                                    properties = link_data.get('properties', {})
+                                    file_name = (
+                                        properties.get('FINAL_FILENAME') or
+                                        link_data.get('name', '')
+                                    )
+                                    url = link_data.get('url', '')
+                                    status = link_data.get('availability', 'UNKNOWN')
+                                    size = link_data.get('size', 0)
+
+                                results.append({
+                                    'package_name': package_name,
+                                    'file_name': file_name,
+                                    'url': url,
+                                    'status': status,
+                                    'size': size,
+                                })
+
+                            except (json.JSONDecodeError, KeyError) as e:
+                                logger.debug(f"解析 linkgrabber link 失敗 {link_file}: {e}")
+
+                    except (json.JSONDecodeError, KeyError) as e:
+                        logger.debug(f"解析 linkgrabber package 失敗 {pkg_name}: {e}")
+
+        except Exception as e:
+            logger.error(f"讀取 linkgrabber 列表失敗: {e}")
+
+        logger.debug(f"讀取 linkgrabber 列表: {len(results)} 筆")
+        return results
+
+    def get_online_links_from_grabber(self) -> List[Dict]:
+        """取得 linkgrabber 中狀態為 ONLINE 的連結"""
+        links = self.read_linkgrabber_list()
+        return [r for r in links if r.get('status') == 'ONLINE']
+
 
 def test_reader():
     """測試讀取器"""

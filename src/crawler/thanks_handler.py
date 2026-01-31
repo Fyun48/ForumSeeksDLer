@@ -259,7 +259,16 @@ class ThanksHandler:
 
         # 條件 2: 檢查是否有實際的下載連結 (完整 URL)
         download_link_patterns = [
+            # Google Drive
+            r'https?://drive\.google\.com/file/d/[A-Za-z0-9_-]+',
+            r'https?://drive\.google\.com/open\?id=',
+            # Transfer.it / Transfer.sh
+            r'https?://transfer\.it/[^\s<>"\']+',
+            r'https?://transfer\.sh/[^\s<>"\']+',
+            # MEGA
             r'https?://mega\.nz/(?:file|folder)/[A-Za-z0-9_-]+',
+            r'https?://mega\.co\.nz/',
+            # Other hosts
             r'https?://gofile\.io/d/[A-Za-z0-9]+',
             r'https?://katfile\.com/[A-Za-z0-9]+',
             r'https?://rapidgator\.net/file/',
@@ -282,8 +291,9 @@ class ThanksHandler:
 
         # 條件 3: 檢查是否有解壓密碼
         password_patterns = [
-            r'FAST[A-Za-z0-9]{10,}_by_FastZone\.ORG',
-            r'[A-Za-z0-9_]+_by_(?:OKFUN|MEGAFUNPRO|FCBZONE)\.(?:ORG|COM)',
+            r'FAST[A-Za-z0-9]{8,}_by_FastZone\.ORG',
+            r'[A-Za-z0-9_]+_by_(?:OKFUN|MEGAFUNPRO|FCBZONE|21AV)\.(?:ORG|COM|NET)',
+            r's\d+_by_FastZone\.ORG',  # s13943013_by_FastZone.ORG 格式
         ]
 
         has_password = False

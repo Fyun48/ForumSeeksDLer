@@ -579,8 +579,6 @@ class WebDownloadWidget(QWidget):
 
             with open(self._settings_file, 'w', encoding='utf-8') as f:
                 json.dump(settings, f)
-
-            logger.debug(f"已儲存欄位寬度: {widths}")
         except Exception as e:
             logger.warning(f"儲存欄位寬度失敗: {e}")
 
@@ -597,7 +595,6 @@ class WebDownloadWidget(QWidget):
                         # 跳過第 0 欄（勾選框 Fixed）和第 1 欄（標題 Stretch）
                         if i > 1:
                             self.table.setColumnWidth(i, width)
-                    logger.debug(f"已還原欄位寬度: {widths}")
                     return
 
             # 使用預設寬度

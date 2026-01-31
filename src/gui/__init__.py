@@ -5,6 +5,7 @@ from .section_manager_widget import SectionManagerWidget
 from .section_search_widget import SectionSearchWidget
 from .section_search_manager_widget import SectionSearchManagerWidget
 from .search_download_worker import SearchDownloadWorker
+from .workers import CrawlerWorker, ExtractWorker
 
 __all__ = [
     'MainWindow',
@@ -14,5 +15,7 @@ __all__ = [
     'SectionManagerWidget',
     'SectionSearchWidget',
     'SectionSearchManagerWidget',
-    'SearchDownloadWorker'
+    'SearchDownloadWorker',
+    'CrawlerWorker',
+    'ExtractWorker'
 ]

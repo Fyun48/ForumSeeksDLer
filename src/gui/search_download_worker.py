@@ -11,6 +11,7 @@ from ..crawler.forum_client import ForumClient
 from ..crawler.thanks_handler import ThanksHandler
 from ..downloader.link_extractor import LinkExtractor
 from ..downloader.jd_integration import JDownloaderIntegration
+from ..downloader.smg_integration import SMGIntegration, extract_smg_code
 from ..database.db_manager import DatabaseManager
 from ..utils.logger import logger
 
@@ -37,7 +38,9 @@ class SearchDownloadWorker(QThread):
             'success': 0,
             'failed': 0,
             'skipped': 0,
-            'links_extracted': 0
+            'links_extracted': 0,
+            'web_downloads': 0,
+            'smg_downloads': 0
         }
 
         try:
@@ -56,7 +59,29 @@ class SearchDownloadWorker(QThread):
             )
             db = DatabaseManager()
 
+            # 網頁下載和 SMG 關鍵字
+            web_download_keywords = self.config.get('forum', {}).get('web_download_keywords', [])
+            smg_keywords = self.config.get('forum', {}).get('smg_keywords', [])
+
+            # SMG 整合
+            smg_config = self.config.get('smg', {})
+            smg = SMGIntegration(
+                exe_path=smg_config.get('exe_path'),
+                download_dir=smg_config.get('download_dir') or self.config.get('paths', {}).get('download_dir')
+            )
+
             delay_between_thanks = self.config.get('scraper', {}).get('delay_between_thanks', 5)
+
+            def get_download_type(title: str):
+                """判斷下載類型"""
+                title_lower = title.lower()
+                for kw in smg_keywords:
+                    if kw.lower() in title_lower:
+                        return 'smg', kw
+                for kw in web_download_keywords:
+                    if kw.lower() in title_lower:
+                        return 'web', kw
+                return 'jd', None
 
             # 處理每個帖子
             for i, post in enumerate(self.selected_posts):
@@ -70,11 +95,8 @@ class SearchDownloadWorker(QThread):
                 self.progress_signal.emit(i + 1, len(self.selected_posts), title[:50])
                 self.log_signal.emit(f"處理 [{i+1}/{len(self.selected_posts)}]: {title[:60]}...")
 
-                # 檢查是否已下載過
-                if db.is_downloaded(tid):
-                    self.log_signal.emit(f"  跳過已下載: {title[:40]}...")
-                    stats['skipped'] += 1
-                    continue
+                # 版區搜尋管理的下載不檢查是否已下載過，永遠執行
+                # (主爬蟲的「已感謝帖子仍嘗試下載」選項不影響此處)
 
                 # 發送感謝
                 self.log_signal.emit(f"  發送感謝...")
@@ -109,6 +131,35 @@ class SearchDownloadWorker(QThread):
 
                     html = client.get_thread_page(tid)
                     if html:
+                        # 判斷下載類型
+                        download_type, matched_kw = get_download_type(title)
+
+                        # SMG 類型：嘗試提取 SMG 編碼
+                        if download_type == 'smg':
+                            smg_code = extract_smg_code(html)
+                            if smg_code:
+                                self.log_signal.emit(f"  [SMG] 找到編碼，發送到 SMG")
+                                if smg.send_download_with_retry(smg_code):
+                                    stats['smg_downloads'] += 1
+                                    stats['success'] += 1
+                                    # 提取密碼並記錄 SMG 下載到資料庫
+                                    smg_result = extractor.extract_from_html(html)
+                                    smg_password = smg_result.get('password')
+                                    post_url = post.get('post_url', f"thread-{tid}-1-1.html")
+                                    db.add_smg_download(
+                                        thread_id=tid,
+                                        title=title,
+                                        post_url=post_url,
+                                        keyword=matched_kw or '',
+                                        smg_code=smg_code,
+                                        password=smg_password
+                                    )
+                                    self.log_signal.emit(f"  [SMG] 任務已發送並記錄")
+                                    links_found = True
+                                    break
+                                else:
+                                    self.log_signal.emit(f"  [SMG] 發送失敗")
+
                         result = extractor.extract_from_html(html)
                         if result['links']:
                             links = result['links']
@@ -131,8 +182,24 @@ class SearchDownloadWorker(QThread):
                                 )
                                 db.mark_sent_to_jd(download_id, title)
 
-                            # 建立 crawljob 送到 JDownloader
-                            jd.create_crawljob(links, title, password)
+                            # 根據下載類型分發
+                            if download_type == 'web':
+                                # 網頁下載：記錄到資料庫
+                                post_url = post.get('post_url', f"thread-{tid}-1-1.html")
+                                for link in links:
+                                    db.add_web_download(
+                                        thread_id=tid,
+                                        title=title,
+                                        post_url=post_url,
+                                        keyword=matched_kw,
+                                        download_url=link['url'],
+                                        password=password
+                                    )
+                                stats['web_downloads'] += len(links)
+                                self.log_signal.emit(f"  [網頁下載] 記錄 {len(links)} 個連結")
+                            else:
+                                # JDownloader
+                                jd.create_crawljob(links, title, password)
 
                             stats['success'] += 1
                             stats['links_extracted'] += len(links)
@@ -149,8 +216,12 @@ class SearchDownloadWorker(QThread):
             self.log_signal.emit("")
             self.log_signal.emit("=" * 50)
             self.log_signal.emit("批次下載完成")
-            self.log_signal.emit(f"成功: {stats['success']}, 失敗: {stats['failed']}, 跳過: {stats['skipped']}")
+            self.log_signal.emit(f"成功: {stats['success']}, 失敗: {stats['failed']}")
             self.log_signal.emit(f"提取連結數: {stats['links_extracted']}")
+            if stats['web_downloads'] > 0:
+                self.log_signal.emit(f"網頁下載: {stats['web_downloads']}")
+            if stats['smg_downloads'] > 0:
+                self.log_signal.emit(f"SMG 下載: {stats['smg_downloads']}")
             self.log_signal.emit("=" * 50)
 
             self.finished_signal.emit(stats)

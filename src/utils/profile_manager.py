@@ -198,7 +198,9 @@ class ProfileManager:
                     "Transfer@HTTP",
                     "Gofile@HTTP",
                     "MEGA@IE"
-                ]
+                ],
+                "web_download_keywords": [],
+                "smg_keywords": []
             },
             "auth": {
                 "cookie_file": str(self._get_cookie_path(path.stem))
@@ -212,6 +214,10 @@ class ProfileManager:
                 "exe_path": "",
                 "folderwatch_path": "",
                 "auto_start": True
+            },
+            "smg": {
+                "exe_path": "",
+                "download_dir": ""
             },
             "scraper": {
                 "pages_per_section": 1,

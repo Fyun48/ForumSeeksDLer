@@ -19,8 +19,8 @@ APP_DISPLAY_NAME = "DLP01 - 論壇自動下載程式"
 APP_AUTHOR = "DLP01 開發團隊"
 
 # GitHub 資訊 (用於自動更新檢查)
-GITHUB_OWNER = ""  # 待設定，例如 "your-username"
-GITHUB_REPO = ""   # 待設定，例如 "dlp01"
+GITHUB_OWNER = "Fyun48"
+GITHUB_REPO = "ForumSeeksDLer"
 
 # =============================================================================
 # 版本工具函式

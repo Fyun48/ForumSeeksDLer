@@ -23,7 +23,6 @@ from PyQt6.QtGui import QAction, QFont, QTextCursor, QIcon, QColor, QBrush
 import yaml
 
 from .extract_settings_widget import ExtractSettingsWidget
-from .extract_history_widget import ExtractHistoryWidget
 from .notifications import NotificationManager
 from .download_history_widget import DownloadTimesDialog
 from .section_search_manager_widget import SectionSearchManagerWidget
@@ -177,10 +176,7 @@ class MainWindow(QMainWindow):
         self.web_download_widget = WebDownloadWidget(config_path=str(self.config_path))
         self.tabs.addTab(self.web_download_widget, "網頁下載")
 
-        # 分頁 7: 解壓記錄
-        self.tabs.addTab(self._create_extract_history_tab(), "解壓記錄")
-
-        # 分頁 8: 解壓縮設定
+        # 分頁 7: 解壓縮設定
         self.tabs.addTab(self._create_extract_settings_tab(), "解壓縮設定")
 
         # 分頁 9: 進階設定
@@ -229,12 +225,12 @@ class MainWindow(QMainWindow):
 
         action_menu.addSeparator()
 
-        start_extract_action = QAction("開始監控解壓", self)
+        start_extract_action = QAction("監控解壓", self)
         start_extract_action.setShortcut("F6")
         start_extract_action.triggered.connect(self._start_extract_monitor)
         action_menu.addAction(start_extract_action)
 
-        stop_extract_action = QAction("停止監控解壓", self)
+        stop_extract_action = QAction("停止解壓", self)
         stop_extract_action.triggered.connect(self._stop_extract_monitor)
         action_menu.addAction(stop_extract_action)
 
@@ -269,8 +265,6 @@ class MainWindow(QMainWindow):
             # 根據分頁名稱載入對應資料
             if tab_name == "下載歷史":
                 self._refresh_history()
-            elif tab_name == "解壓記錄":
-                self._refresh_extract_history()
             elif tab_name == "網頁下載":
                 if hasattr(self, 'web_download_widget'):
                     self.web_download_widget.load_data()
@@ -328,12 +322,12 @@ class MainWindow(QMainWindow):
         extract_label.setFont(QFont("", 12, QFont.Weight.Bold))
         extract_layout.addWidget(extract_label)
 
-        self.btn_start_extract = QPushButton("開始監控")
+        self.btn_start_extract = QPushButton("監控解壓")
         self.btn_start_extract.setMinimumHeight(40)
         self.btn_start_extract.clicked.connect(self._start_extract_monitor)
         extract_layout.addWidget(self.btn_start_extract)
 
-        self.btn_stop_extract = QPushButton("停止監控")
+        self.btn_stop_extract = QPushButton("停止")
         self.btn_stop_extract.setMinimumHeight(40)
         self.btn_stop_extract.setEnabled(False)
         self.btn_stop_extract.clicked.connect(self._stop_extract_monitor)
@@ -712,38 +706,6 @@ class MainWindow(QMainWindow):
 
         return tab
 
-    def _create_extract_history_tab(self) -> QWidget:
-        """建立解壓記錄分頁"""
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-
-        # 統計資訊
-        stats_group = QGroupBox("解壓統計")
-        stats_layout = QGridLayout(stats_group)
-
-        self.lbl_extract_success_count = QLabel("成功: 0")
-        self.lbl_extract_failed_count = QLabel("失敗: 0")
-        self.lbl_extract_pending_count = QLabel("待解壓: 0")
-        self.lbl_total_files_extracted = QLabel("總檔案數: 0")
-        self.lbl_total_files_filtered = QLabel("過濾檔案: 0")
-        self.lbl_total_archive_size = QLabel("總壓縮大小: 0")
-
-        stats_layout.addWidget(self.lbl_extract_success_count, 0, 0)
-        stats_layout.addWidget(self.lbl_extract_failed_count, 0, 1)
-        stats_layout.addWidget(self.lbl_extract_pending_count, 0, 2)
-        stats_layout.addWidget(self.lbl_total_files_extracted, 1, 0)
-        stats_layout.addWidget(self.lbl_total_files_filtered, 1, 1)
-        stats_layout.addWidget(self.lbl_total_archive_size, 1, 2)
-
-        layout.addWidget(stats_group)
-
-        # 解壓記錄元件
-        self.extract_history_widget = ExtractHistoryWidget()
-        self.extract_history_widget.refresh_requested.connect(self._refresh_extract_history)
-        layout.addWidget(self.extract_history_widget)
-
-        return tab
-
     def _create_extract_settings_tab(self) -> QWidget:
         """建立解壓縮設定分頁"""
         tab = QWidget()
@@ -775,48 +737,6 @@ class MainWindow(QMainWindow):
         self.config.update(extract_settings)
         self._save_config()
         self.statusBar().showMessage("解壓縮設定已儲存", 3000)
-
-    def _refresh_extract_history(self):
-        """重新整理解壓記錄"""
-        try:
-            from ..database.db_manager import DatabaseManager
-            db = DatabaseManager()
-
-            # 更新統計資訊
-            stats = db.get_extraction_stats()
-            self.lbl_extract_success_count.setText(f"成功: {stats.get('success_count', 0)}")
-            self.lbl_extract_failed_count.setText(f"失敗: {stats.get('failed_count', 0)}")
-            self.lbl_extract_pending_count.setText(f"待解壓: {stats.get('pending_count', 0)}")
-            self.lbl_total_files_extracted.setText(f"總檔案數: {stats.get('total_files_extracted', 0)}")
-            self.lbl_total_files_filtered.setText(f"過濾檔案: {stats.get('total_files_filtered', 0)}")
-
-            # 格式化總大小
-            total_size = stats.get('total_archive_size', 0) or 0
-            if total_size < 1024 * 1024 * 1024:
-                size_str = f"{total_size / 1024 / 1024:.1f} MB"
-            else:
-                size_str = f"{total_size / 1024 / 1024 / 1024:.2f} GB"
-            self.lbl_total_archive_size.setText(f"總壓縮大小: {size_str}")
-
-            # 載入解壓記錄
-            records = db.get_extraction_history(limit=200)
-
-            # 取得巢狀記錄
-            nested_records = {}
-            for record in records:
-                record_id = record.get('id')
-                if record_id:
-                    nested = db.get_nested_extractions(record_id)
-                    if nested:
-                        nested_records[record_id] = nested
-
-            # 載入到元件
-            self.extract_history_widget.load_records(records, nested_records)
-
-            self.statusBar().showMessage(f"已載入 {len(records)} 筆解壓記錄", 3000)
-
-        except Exception as e:
-            QMessageBox.warning(self, "錯誤", f"載入解壓記錄失敗: {e}")
 
     def _create_advanced_tab(self) -> QWidget:
         """建立進階設定分頁"""
@@ -902,22 +822,26 @@ class MainWindow(QMainWindow):
         db_group = QGroupBox("資料庫管理")
         db_layout = QGridLayout(db_group)
 
+        # 記錄保留天數
         db_layout.addWidget(QLabel("記錄保留天數:"), 0, 0)
         self.spin_retention_days = QSpinBox()
-        self.spin_retention_days.setRange(7, 365)
-        self.spin_retention_days.setValue(30)
+        self.spin_retention_days.setRange(1, 365)
+        self.spin_retention_days.setValue(90)
+        self.spin_retention_days.setToolTip("帖子、下載記錄的保留天數（預設 90 天）")
         db_layout.addWidget(self.spin_retention_days, 0, 1)
 
-        btn_cleanup = QPushButton("清理舊記錄")
-        btn_cleanup.clicked.connect(self._cleanup_old_records)
-        db_layout.addWidget(btn_cleanup, 0, 2)
+        # 感謝記錄保留年數
+        db_layout.addWidget(QLabel("感謝記錄保留年數:"), 1, 0)
+        self.spin_thanked_retention_years = QSpinBox()
+        self.spin_thanked_retention_years.setRange(1, 10)
+        self.spin_thanked_retention_years.setValue(1)
+        self.spin_thanked_retention_years.setToolTip("已感謝帖子的 TID 保留年數（用於避免重複感謝）")
+        db_layout.addWidget(self.spin_thanked_retention_years, 1, 1)
 
-        db_layout.addWidget(QLabel(""), 1, 0)  # 空行
-
-        btn_clear_all = QPushButton("一鍵清除所有記錄")
-        btn_clear_all.setStyleSheet(DANGER_BUTTON)
-        btn_clear_all.clicked.connect(self._clear_all_records)
-        db_layout.addWidget(btn_clear_all, 2, 0, 1, 3)
+        # 清除記錄按鈕
+        btn_clear_records = QPushButton("清除記錄...")
+        btn_clear_records.clicked.connect(self._show_clear_records_dialog)
+        db_layout.addWidget(btn_clear_records, 0, 2, 2, 1)
 
         layout.addWidget(db_group)
 
@@ -2132,7 +2056,7 @@ class MainWindow(QMainWindow):
         )
 
     def _start_extract_monitor(self):
-        """開始解壓監控"""
+        """開始批次解壓"""
         self.btn_start_extract.setEnabled(False)
         self.btn_stop_extract.setEnabled(True)
         self.extract_status.setText("狀態: 啟動中...")
@@ -2140,8 +2064,8 @@ class MainWindow(QMainWindow):
         config = self.config.copy()
         config['extract_interval'] = self.spin_extract_interval.value()
 
-        # 使用自動停止模式
-        self.extract_worker = ExtractWorker(config, use_auto_stop=True)
+        # 批次解壓模式: 同步 JD 檔名 → 處理全部 → 結束
+        self.extract_worker = ExtractWorker(config)
         self.extract_worker.log_signal.connect(self._append_log)
         self.extract_worker.status_signal.connect(
             lambda s: self.extract_status.setText(f"狀態: {s}")
@@ -2588,76 +2512,91 @@ class MainWindow(QMainWindow):
         clipboard.setText(text)
         QToolTip.showText(QCursor.pos(), f"已複製{label}", self, self.rect(), 1500)
 
-    def _cleanup_old_records(self):
-        """清理舊記錄"""
+    def _show_clear_records_dialog(self):
+        """顯示清除記錄對話框"""
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QRadioButton, QButtonGroup
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("清除記錄")
+        dialog.setMinimumWidth(350)
+        layout = QVBoxLayout(dialog)
+
+        # 取得 UI 設定值
         retention_days = self.spin_retention_days.value()
+        thanked_years = self.spin_thanked_retention_years.value()
 
-        reply = QMessageBox.question(
-            self, "確認清理",
-            f"確定要清理超過 {retention_days} 天的舊記錄嗎？\n此操作無法復原。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
+        # 清除選項
+        radio_group = QButtonGroup(dialog)
+
+        radio_by_days = QRadioButton(f"清除超過 {retention_days} 天的舊記錄")
+        radio_by_days.setChecked(True)
+        radio_group.addButton(radio_by_days, 1)
+        layout.addWidget(radio_by_days)
+
+        radio_all = QRadioButton("清除全部記錄")
+        radio_group.addButton(radio_all, 2)
+        layout.addWidget(radio_all)
+
+        # 說明文字
+        info_label = QLabel(
+            f"\n說明：\n"
+            f"• 感謝記錄將保留 {thanked_years} 年（避免重複感謝）\n"
+            f"• 此操作無法復原"
         )
+        info_label.setStyleSheet("color: gray;")
+        layout.addWidget(info_label)
 
-        if reply == QMessageBox.StandardButton.Yes:
+        # 按鈕
+        btn_layout = QHBoxLayout()
+        btn_cancel = QPushButton("取消")
+        btn_cancel.clicked.connect(dialog.reject)
+        btn_confirm = QPushButton("確定清除")
+        btn_confirm.setStyleSheet("background-color: #d9534f; color: white;")
+        btn_confirm.clicked.connect(dialog.accept)
+        btn_layout.addWidget(btn_cancel)
+        btn_layout.addWidget(btn_confirm)
+        layout.addLayout(btn_layout)
+
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            is_clear_all = (radio_group.checkedId() == 2)
+
+            # 全部清除需要二次確認
+            if is_clear_all:
+                confirm = QMessageBox.warning(
+                    self, "警告",
+                    "確定要清除所有記錄嗎？\n\n"
+                    f"• 所有帖子、下載記錄和執行歷史將被刪除\n"
+                    f"• 感謝記錄將保留 {thanked_years} 年\n"
+                    "• 此操作無法復原！",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if confirm != QMessageBox.StandardButton.Yes:
+                    return
+
             try:
                 from ..database.db_manager import DatabaseManager
                 db = DatabaseManager()
-                result = db.cleanup_old_records(retention_days)
-
-                QMessageBox.information(
-                    self, "清理完成",
-                    f"已清理:\n"
-                    f"- 帖子: {result['deleted_posts']} 筆\n"
-                    f"- 下載記錄: {result['deleted_downloads']} 筆\n"
-                    f"- 執行記錄: {result['deleted_runs']} 筆"
+                result = db.clear_records(
+                    retention_days=retention_days if not is_clear_all else 0,
+                    thanked_retention_years=thanked_years
                 )
+
+                msg = f"已清除:\n" \
+                      f"- 帖子: {result['deleted_posts']} 筆\n" \
+                      f"- 下載記錄: {result['deleted_downloads']} 筆\n" \
+                      f"- 執行記錄: {result['deleted_runs']} 筆"
+
+                if result.get('deleted_thanked', 0) > 0:
+                    msg += f"\n- 過期感謝記錄: {result['deleted_thanked']} 筆"
+
+                QMessageBox.information(self, "清除完成", msg)
 
                 # 重新整理歷史
                 self._refresh_history()
 
             except Exception as e:
-                QMessageBox.warning(self, "錯誤", f"清理失敗: {e}")
-
-    def _clear_all_records(self):
-        """一鍵清除所有記錄"""
-        reply = QMessageBox.warning(
-            self, "警告",
-            "確定要清除所有資料庫記錄嗎？\n\n"
-            "這將刪除所有帖子、下載記錄和執行歷史！\n"
-            "此操作無法復原！",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
-        )
-
-        if reply == QMessageBox.StandardButton.Yes:
-            # 二次確認
-            confirm = QMessageBox.question(
-                self, "再次確認",
-                "這是最後確認，真的要清除所有記錄嗎？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
-
-            if confirm == QMessageBox.StandardButton.Yes:
-                try:
-                    from ..database.db_manager import DatabaseManager
-                    db = DatabaseManager()
-                    result = db.clear_all_records()
-
-                    QMessageBox.information(
-                        self, "清除完成",
-                        f"已清除:\n"
-                        f"- 帖子: {result['deleted_posts']} 筆\n"
-                        f"- 下載記錄: {result['deleted_downloads']} 筆\n"
-                        f"- 執行記錄: {result['deleted_runs']} 筆"
-                    )
-
-                    # 重新整理歷史
-                    self._refresh_history()
-
-                except Exception as e:
-                    QMessageBox.warning(self, "錯誤", f"清除失敗: {e}")
+                QMessageBox.warning(self, "錯誤", f"清除失敗: {e}")
 
     # ===== 設定檔管理方法 =====
 

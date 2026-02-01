@@ -1380,6 +1380,82 @@ class ExtractMonitor:
 
         return stats
 
+    def run_batch_extract(self, delete_after: bool = True, db_manager=None) -> dict:
+        """
+        批次解壓模式 - 一次性處理所有壓縮檔
+
+        流程:
+        1. 同步 JD 實體檔名到資料庫
+        2. 處理所有待解壓的壓縮檔
+        3. 結束 (不持續監控)
+
+        Args:
+            delete_after: 解壓後是否刪除原檔
+            db_manager: 資料庫管理器
+
+        Returns:
+            統計結果
+        """
+        stats = {
+            'total_processed': 0,
+            'total_success': 0,
+            'total_failed': 0,
+            'blacklisted_files': [],
+            'synced_filenames': 0,
+            'stop_reason': None
+        }
+
+        # 步驟 1: 同步 JD 實體檔名到資料庫
+        logger.info("步驟 1/2: 同步 JDownloader 實體檔名...")
+        synced = self._sync_jd_filenames_to_db(db_manager)
+        stats['synced_filenames'] = synced
+        if synced > 0:
+            logger.info(f"已同步 {synced} 筆實體檔名")
+        else:
+            logger.info("無新的實體檔名需要同步")
+
+        # 步驟 2: 處理所有待解壓的壓縮檔
+        logger.info(f"步驟 2/2: 處理壓縮檔 ({self.download_dir})")
+
+        archives = self._find_processable_archives()
+
+        if not archives:
+            logger.info("沒有待處理的壓縮檔")
+            stats['stop_reason'] = '無待處理檔案'
+            return stats
+
+        logger.info(f"找到 {len(archives)} 個待處理壓縮檔")
+
+        for i, archive in enumerate(archives, 1):
+            if self._stop_requested:
+                stats['stop_reason'] = '使用者停止'
+                break
+
+            logger.info(f"[{i}/{len(archives)}] 處理: {archive.name}")
+            result = self.process_archive(archive, db_manager=db_manager)
+
+            self.processed_files.add(str(archive))
+            stats['total_processed'] += 1
+
+            if result.success:
+                stats['total_success'] += 1
+            else:
+                stats['total_failed'] += 1
+                self.failure_tracker.record_failure(str(archive))
+                stats['blacklisted_files'].append(archive.name)
+                self.signals.file_blacklisted.emit(
+                    archive.name,
+                    self.failure_tracker.get_failure_count(str(archive))
+                )
+
+        if stats['stop_reason'] is None:
+            stats['stop_reason'] = '處理完成'
+
+        logger.info(f"批次解壓完成: 處理 {stats['total_processed']} 個, "
+                   f"成功 {stats['total_success']} 個, 失敗 {stats['total_failed']} 個")
+
+        return stats
+
     def _find_processable_archives(self) -> List[Path]:
         """找出可處理的壓縮檔（排除已處理和已放棄的）"""
         # 使用 set 避免重複（同一檔案可能匹配多個 pattern）

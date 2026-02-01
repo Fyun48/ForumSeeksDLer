@@ -127,15 +127,19 @@ class LinkExtractor:
             logger.debug("標準提取未找到連結，嘗試上下文提取...")
             links = self._extract_links_by_context(full_text_lines, full_html)
 
-        # 密碼提取：優先檢查「密碼:」或「【解壓密碼】」後換行的格式
+        # 密碼提取：優先從 hideContent 區塊提取（處理 mailto 標籤問題）
         password = None
 
-        # 移除全形空格後檢查是否有密碼標記
-        text_no_space = re.sub(r'[\u3000]+', '', full_text_lines)
-        # 支援【解壓密碼】、【解壓密碼】：、【密碼】、密碼: 等格式
-        if re.search(r'(?:^|\n)\s*(?:【(?:解[壓压])?密[碼码]】[：:]?|密[碼码]\s*[：:])\s*(?:\n|$)', text_no_space):
-            logger.debug("偵測到密碼標記換行格式，使用上下文提取...")
-            password = self._extract_password_by_context(full_text_lines)
+        # 階段 0: 優先從 hideContent div 提取密碼（處理 <a href="mailto:"> 標籤）
+        password = self._extract_password_from_hidden_content(soup)
+
+        if not password:
+            # 移除全形空格後檢查是否有密碼標記
+            text_no_space = re.sub(r'[\u3000]+', '', full_text_lines)
+            # 支援【解壓密碼】、【解壓密碼】：、【密碼】、密碼: 等格式
+            if re.search(r'(?:^|\n)\s*(?:【(?:解[壓压])?密[碼码]】[：:]?|密[碼码]\s*[：:])\s*(?:\n|$)', text_no_space):
+                logger.debug("偵測到密碼標記換行格式，使用上下文提取...")
+                password = self._extract_password_by_context(full_text_lines)
 
         # 如果上下文提取沒找到，使用標準正則提取
         if not password:
@@ -151,6 +155,72 @@ class LinkExtractor:
             'password': password,
             'archive_names': archive_names
         }
+
+    def _extract_password_from_hidden_content(self, soup: BeautifulSoup) -> Optional[str]:
+        """
+        從 hideContent div 提取密碼
+
+        處理論壇將密碼中的 @ 符號自動轉換為 mailto 連結的問題
+        例如: @@@@109DA00D74_by_OKFUN.ORG@FC2PPV <a href="mailto:...">...</a>@@
+        整段應該是一個完整的密碼
+        """
+        hide_content_divs = soup.select('div.hideContent, .hideContent')
+
+        for div in hide_content_divs:
+            # 取得 div 的原始 HTML
+            div_html = str(div)
+
+            # 移除 <a href="mailto:...">...</a> 標籤，但保留內部文字
+            # 先處理 mailto 連結
+            cleaned_html = re.sub(
+                r'<a[^>]+href=["\']mailto:[^"\']*["\'][^>]*>([^<]*)</a>',
+                r'\1',
+                div_html,
+                flags=re.IGNORECASE
+            )
+
+            # 移除所有其他 HTML 標籤
+            cleaned_text = re.sub(r'<[^>]+>', '', cleaned_html)
+
+            # 清理空白字元（但保留密碼中間的單一空格）
+            cleaned_text = cleaned_text.strip()
+            # 將多個連續空白替換為單一空格
+            cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
+
+            if not cleaned_text:
+                continue
+
+            logger.debug(f"hideContent 原始內容: {cleaned_text[:100]}...")
+
+            # 檢查是否包含密碼特徵
+            # 密碼通常包含 _by_ 或特定站點名稱
+            if '_by_' in cleaned_text:
+                # 驗證密碼格式
+                # 密碼可能很長，包含空格和特殊字元
+                # 例如: @@@@109DA00D74_by_OKFUN.ORG@FC2PPV 4839666.@FASTPO536955E9EBLMH_by_FastZone.ORG@@
+
+                # 檢查長度合理性（8-150 字元）
+                if 8 <= len(cleaned_text) <= 150:
+                    # 檢查不是純粹的提示文字
+                    skip_markers = ['隱藏限制通過', '感謝您對作者的支持', '嚴禁公開', '超過', '日期限']
+                    is_marker = any(marker in cleaned_text for marker in skip_markers)
+
+                    if not is_marker:
+                        logger.info(f"從 hideContent 提取密碼: {cleaned_text}")
+                        return cleaned_text
+
+            # 如果沒有 _by_ 但有明確的密碼格式特徵
+            # 檢查是否是以 @ 開頭或包含多個 @ 符號的密碼
+            if cleaned_text.startswith('@') or cleaned_text.count('@') >= 2:
+                if 8 <= len(cleaned_text) <= 150:
+                    skip_markers = ['隱藏限制通過', '感謝您對作者的支持', '嚴禁公開', '超過', '日期限']
+                    is_marker = any(marker in cleaned_text for marker in skip_markers)
+
+                    if not is_marker:
+                        logger.info(f"從 hideContent 提取密碼 (@ 格式): {cleaned_text}")
+                        return cleaned_text
+
+        return None
 
     def _extract_links(self, html: str) -> List[Dict]:
         """提取所有下載連結 - 優先從 <a href> 屬性提取"""

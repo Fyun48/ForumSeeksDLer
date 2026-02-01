@@ -109,6 +109,15 @@ class DatabaseManager:
                 except sqlite3.OperationalError:
                     pass  # 欄位已存在
 
+            # thanked_threads 表 - 輕量感謝記錄（永久保留）
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS thanked_threads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thread_id TEXT UNIQUE NOT NULL,
+                    thanked_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
             # download_history 表 - 追蹤每次下載時間
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS download_history (
@@ -259,6 +268,13 @@ class DatabaseManager:
                 UPDATE posts SET thanked_at = ?, thanks_success = ?
                 WHERE thread_id = ?
             ''', (datetime.now().isoformat(), success, thread_id))
+
+            # 同時寫入 thanked_threads 表（輕量永久記錄）
+            if success:
+                cursor.execute('''
+                    INSERT OR IGNORE INTO thanked_threads (thread_id)
+                    VALUES (?)
+                ''', (thread_id,))
 
     def get_unthanked_posts(self) -> List[Dict[str, Any]]:
         """取得尚未感謝的帖子"""
@@ -587,72 +603,89 @@ class DatabaseManager:
                 'total_extracted_size': total_extracted_size
             }
 
-    def cleanup_old_records(self, retention_days: int) -> Dict[str, int]:
-        """清理超過保留天數的舊記錄"""
-        cutoff_date = (datetime.now() - timedelta(days=retention_days)).isoformat()
+    def clear_records(self, retention_days: int = 0, thanked_retention_years: int = 0) -> Dict[str, int]:
+        """
+        統一清除記錄入口
 
+        Args:
+            retention_days: 記錄保留天數（0 = 全部清除）
+            thanked_retention_years: 感謝記錄保留年數（0 = 不清除感謝記錄）
+
+        Returns:
+            清除的記錄數量統計
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
-
-            # 先取得要刪除的 post_ids
-            cursor.execute('''
-                SELECT id FROM posts WHERE first_seen_at < ?
-            ''', (cutoff_date,))
-            old_post_ids = [row[0] for row in cursor.fetchall()]
 
             deleted_downloads = 0
             deleted_posts = 0
             deleted_runs = 0
+            deleted_thanked = 0
 
-            if old_post_ids:
-                # 刪除相關的 downloads
-                placeholders = ','.join('?' * len(old_post_ids))
-                cursor.execute(f'''
-                    DELETE FROM downloads WHERE post_id IN ({placeholders})
-                ''', old_post_ids)
-                deleted_downloads = cursor.rowcount
+            if retention_days > 0:
+                # 清除超過保留天數的記錄
+                cutoff_date = (datetime.now() - timedelta(days=retention_days)).isoformat()
 
-                # 刪除舊的 posts
-                cursor.execute(f'''
-                    DELETE FROM posts WHERE id IN ({placeholders})
-                ''', old_post_ids)
-                deleted_posts = cursor.rowcount
+                # 先取得要刪除的 post_ids
+                cursor.execute('''
+                    SELECT id FROM posts WHERE first_seen_at < ?
+                ''', (cutoff_date,))
+                old_post_ids = [row[0] for row in cursor.fetchall()]
 
-            # 刪除舊的執行記錄
-            cursor.execute('''
-                DELETE FROM run_history WHERE started_at < ?
-            ''', (cutoff_date,))
-            deleted_runs = cursor.rowcount
+                if old_post_ids:
+                    placeholders = ','.join('?' * len(old_post_ids))
+                    cursor.execute(f'''
+                        DELETE FROM downloads WHERE post_id IN ({placeholders})
+                    ''', old_post_ids)
+                    deleted_downloads = cursor.rowcount
+
+                    cursor.execute(f'''
+                        DELETE FROM posts WHERE id IN ({placeholders})
+                    ''', old_post_ids)
+                    deleted_posts = cursor.rowcount
+
+                cursor.execute('''
+                    DELETE FROM run_history WHERE started_at < ?
+                ''', (cutoff_date,))
+                deleted_runs = cursor.rowcount
+            else:
+                # 全部清除
+                cursor.execute('SELECT COUNT(*) FROM downloads')
+                deleted_downloads = cursor.fetchone()[0]
+
+                cursor.execute('SELECT COUNT(*) FROM posts')
+                deleted_posts = cursor.fetchone()[0]
+
+                cursor.execute('SELECT COUNT(*) FROM run_history')
+                deleted_runs = cursor.fetchone()[0]
+
+                cursor.execute('DELETE FROM downloads')
+                cursor.execute('DELETE FROM posts')
+                cursor.execute('DELETE FROM run_history')
+
+            # 清除感謝記錄（如果指定了年數）
+            if thanked_retention_years > 0:
+                cursor.execute('''
+                    DELETE FROM thanked_threads
+                    WHERE thanked_at < datetime('now', ? || ' years')
+                ''', (f'-{thanked_retention_years}',))
+                deleted_thanked = cursor.rowcount
 
             return {
                 'deleted_posts': deleted_posts,
                 'deleted_downloads': deleted_downloads,
-                'deleted_runs': deleted_runs
+                'deleted_runs': deleted_runs,
+                'deleted_thanked': deleted_thanked
             }
+
+    # 保留舊函數名稱以向後相容
+    def cleanup_old_records(self, retention_days: int) -> Dict[str, int]:
+        """清理超過保留天數的舊記錄（向後相容）"""
+        return self.clear_records(retention_days=retention_days)
 
     def clear_all_records(self) -> Dict[str, int]:
-        """清除所有記錄 (一鍵清除)"""
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-
-            cursor.execute('SELECT COUNT(*) FROM downloads')
-            downloads_count = cursor.fetchone()[0]
-
-            cursor.execute('SELECT COUNT(*) FROM posts')
-            posts_count = cursor.fetchone()[0]
-
-            cursor.execute('SELECT COUNT(*) FROM run_history')
-            runs_count = cursor.fetchone()[0]
-
-            cursor.execute('DELETE FROM downloads')
-            cursor.execute('DELETE FROM posts')
-            cursor.execute('DELETE FROM run_history')
-
-            return {
-                'deleted_posts': posts_count,
-                'deleted_downloads': downloads_count,
-                'deleted_runs': runs_count
-            }
+        """清除所有記錄（向後相容，不清除感謝記錄）"""
+        return self.clear_records(retention_days=0)
 
     def get_download_history(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
         """取得下載/解壓歷史記錄"""
@@ -716,16 +749,63 @@ class DatabaseManager:
                 'pending_extract': pending_extract
             }
 
-    # ========== 下載次數追蹤 ==========
+    # ========== 感謝記錄追蹤 ==========
 
     def has_thanked(self, thread_id: str) -> bool:
-        """檢查帖子是否已感謝過"""
+        """
+        檢查帖子是否已感謝過
+        優先檢查 thanked_threads 表（輕量永久記錄）
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            # 優先檢查 thanked_threads 表
+            cursor.execute('''
+                SELECT 1 FROM thanked_threads WHERE thread_id = ?
+            ''', (thread_id,))
+            if cursor.fetchone() is not None:
+                return True
+
+            # 備用：檢查 posts 表（向後相容）
             cursor.execute('''
                 SELECT 1 FROM posts WHERE thread_id = ? AND thanks_success = 1
             ''', (thread_id,))
             return cursor.fetchone() is not None
+
+    def add_thanked_thread(self, thread_id: str) -> bool:
+        """
+        記錄已感謝的帖子（輕量記錄）
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute('''
+                    INSERT OR IGNORE INTO thanked_threads (thread_id)
+                    VALUES (?)
+                ''', (thread_id,))
+                return cursor.rowcount > 0
+            except Exception:
+                return False
+
+    def cleanup_thanked_threads(self, retention_years: int = 1) -> int:
+        """
+        清除超過指定年數的感謝記錄
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                DELETE FROM thanked_threads
+                WHERE thanked_at < datetime('now', ? || ' years')
+            ''', (f'-{retention_years}',))
+            return cursor.rowcount
+
+    def get_thanked_threads_count(self) -> int:
+        """取得感謝記錄數量"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT COUNT(*) FROM thanked_threads')
+            return cursor.fetchone()[0]
+
+    # ========== 下載次數追蹤 ==========
 
     def record_download_attempt(self, thread_id: str, filename: str, post_id: int = None) -> int:
         """

@@ -3,6 +3,7 @@ GUI 工作執行緒模組
 將耗時操作放在背景執行緒中執行
 """
 import logging
+from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -109,18 +110,17 @@ class CrawlerWorker(QThread):
 
 
 class ExtractWorker(QThread):
-    """解壓監控工作執行緒"""
+    """解壓批次處理工作執行緒"""
     log_signal = pyqtSignal(str)
     status_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(dict)
     auto_stopped_signal = pyqtSignal(str)
 
-    def __init__(self, config: dict, use_auto_stop: bool = True):
+    def __init__(self, config: dict):
         super().__init__()
         self.config = config
         self.is_running = True
         self.monitor = None
-        self.use_auto_stop = use_auto_stop
 
     def run(self):
         handler = None
@@ -142,10 +142,19 @@ class ExtractWorker(QThread):
                 if jd_exe_path.exists():
                     jd_path = str(jd_exe_path.parent)
 
+            # 在解壓目錄下建立日期資料夾 (YYMMDD 格式)
+            base_extract_dir = Path(self.config['paths']['extract_dir'])
+            date_folder = datetime.now().strftime('%y%m%d')  # 例如: 260201
+            extract_dir_with_date = base_extract_dir / date_folder
+
+            # 建立資料夾（如果不存在）
+            extract_dir_with_date.mkdir(parents=True, exist_ok=True)
+            self.log_signal.emit(f"解壓目錄: {extract_dir_with_date}")
+
             # 建立監控器
             self.monitor = ExtractMonitor(
                 download_dir=self.config['paths']['download_dir'],
-                extract_dir=self.config['paths']['extract_dir'],
+                extract_dir=str(extract_dir_with_date),
                 winrar_path=self.config['paths']['winrar_path'],
                 jd_path=jd_path,
                 config=self.config
@@ -174,40 +183,18 @@ class ExtractWorker(QThread):
             except Exception as e:
                 self.log_signal.emit(f"載入密碼失敗: {e}")
 
-            # 執行監控
-            if self.use_auto_stop:
-                self.status_signal.emit("監控中 (自動停止)")
-                interval = self.config.get('extract_interval', 5)
+            # 執行批次解壓 (同步 JD 檔名 → 處理全部壓縮檔 → 結束)
+            self.status_signal.emit("執行中...")
 
-                stats = self.monitor.run_monitor_with_auto_stop(
-                    interval=interval,
-                    delete_after=True,
-                    db_manager=db
-                )
+            stats = self.monitor.run_batch_extract(
+                delete_after=True,
+                db_manager=db
+            )
 
-                self.finished_signal.emit(stats)
-                if stats.get('stop_reason'):
-                    self.auto_stopped_signal.emit(stats['stop_reason'])
-                self.status_signal.emit("已停止")
-            else:
-                interval = self.config.get('extract_interval', 60)
-                self.status_signal.emit("監控中")
-
-                while self.is_running:
-                    try:
-                        processed = self.monitor.process_archives(delete_after=True, db_manager=db)
-                        if processed > 0:
-                            self.log_signal.emit(f"已處理 {processed} 個壓縮檔")
-                    except Exception as e:
-                        self.log_signal.emit(f"處理錯誤: {e}")
-
-                    for _ in range(interval):
-                        if not self.is_running:
-                            break
-                        self.msleep(1000)
-
-                self.status_signal.emit("已停止")
-                self.finished_signal.emit({'stop_reason': '使用者停止'})
+            self.finished_signal.emit(stats)
+            if stats.get('stop_reason'):
+                self.auto_stopped_signal.emit(stats['stop_reason'])
+            self.status_signal.emit("已完成")
 
         except Exception as e:
             try:

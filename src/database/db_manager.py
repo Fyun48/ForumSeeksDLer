@@ -891,6 +891,45 @@ class DatabaseManager:
                     AND jd_complete_time IS NULL
                 ''', (now, thread_id))
 
+    def _normalize_split_archive_name(self, filename: str) -> str:
+        """
+        標準化分割壓縮檔名，統一使用第一個分割檔
+
+        例如：
+        - xxx.part02.rar → xxx.part01.rar
+        - xxx.part2.rar → xxx.part1.rar
+        - xxx.002 → xxx.001
+        - xxx.r01 → xxx.r00
+
+        Args:
+            filename: 原始檔名
+
+        Returns:
+            標準化後的檔名（第一個分割檔）
+        """
+        import re
+
+        # 模式 1: .partXX.rar 或 .partX.rar
+        match = re.search(r'\.part(\d+)\.rar$', filename, re.IGNORECASE)
+        if match:
+            part_num = match.group(1)
+            # 保持相同的數字位數
+            first_part = '01' if len(part_num) >= 2 else '1'
+            return re.sub(r'\.part\d+\.rar$', f'.part{first_part}.rar', filename, flags=re.IGNORECASE)
+
+        # 模式 2: .XXX (純數字副檔名，如 .001, .002)
+        match = re.search(r'\.(\d{3})$', filename)
+        if match:
+            return re.sub(r'\.\d{3}$', '.001', filename)
+
+        # 模式 3: .rXX (如 .r00, .r01)
+        match = re.search(r'\.r(\d{2})$', filename, re.IGNORECASE)
+        if match:
+            return re.sub(r'\.r\d{2}$', '.r00', filename, flags=re.IGNORECASE)
+
+        # 不是分割檔，返回原檔名
+        return filename
+
     def update_jd_actual_filename(self, package_name: str, actual_filename: str) -> int:
         """
         更新 JDownloader 實際下載的檔名
@@ -902,6 +941,9 @@ class DatabaseManager:
         Returns:
             更新的記錄數量
         """
+        # 標準化分割壓縮檔名（統一使用 part01）
+        actual_filename = self._normalize_split_archive_name(actual_filename)
+
         with self.get_connection() as conn:
             cursor = conn.cursor()
             now = datetime.now().isoformat()

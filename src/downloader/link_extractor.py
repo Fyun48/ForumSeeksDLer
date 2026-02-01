@@ -192,6 +192,16 @@ class LinkExtractor:
 
             logger.debug(f"hideContent 原始內容: {cleaned_text[:100]}...")
 
+            # 移除開頭的標籤文字（如 Password：、密碼:）
+            # 規則：如果開頭有 : 或 ：，則移除冒號及之前的所有文字
+            for colon in ['：', ':']:
+                if colon in cleaned_text:
+                    idx = cleaned_text.find(colon)
+                    # 只處理開頭部分（前 20 個字元內的冒號）
+                    if idx < 20:
+                        cleaned_text = cleaned_text[idx + 1:].strip()
+                        break
+
             # 檢查是否包含密碼特徵
             # 密碼通常包含 _by_ 或特定站點名稱
             if '_by_' in cleaned_text:
@@ -424,6 +434,14 @@ class LinkExtractor:
                 # 清理密碼
                 potential_pwd = line_stripped.strip()
 
+                # 移除開頭的標籤文字（如 Password：、密碼:）
+                for colon in ['：', ':']:
+                    if colon in potential_pwd:
+                        idx = potential_pwd.find(colon)
+                        if idx < 20:
+                            potential_pwd = potential_pwd[idx + 1:].strip()
+                            break
+
                 # 移除開頭的編號 (01. 02. 等)
                 potential_pwd = re.sub(r'^\d+\.\s*', '', potential_pwd)
 
@@ -522,6 +540,17 @@ class LinkExtractor:
         def clean_password(pwd: str) -> str:
             """清理密碼"""
             pwd = pwd.strip()
+
+            # 移除開頭的標籤文字（如 Password：、密碼:）
+            # 規則：如果開頭有 : 或 ：，則移除冒號及之前的所有文字
+            for colon in ['：', ':']:
+                if colon in pwd:
+                    idx = pwd.find(colon)
+                    # 只處理開頭部分（前 20 個字元內的冒號）
+                    if idx < 20:
+                        pwd = pwd[idx + 1:].strip()
+                        break
+
             # 移除常見的後綴文字
             pwd = pwd.rstrip('.,;:!?\'"')
             # 移除中文後綴

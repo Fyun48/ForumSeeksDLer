@@ -192,6 +192,18 @@ class LinkExtractor:
 
             logger.debug(f"hideContent 原始內容: {cleaned_text[:100]}...")
 
+            # 移除 URL（隱藏內容可能同時包含連結和密碼）
+            # 移除 http/https 連結
+            cleaned_text = re.sub(r'https?://[^\s]+', '', cleaned_text)
+            # 移除 // 開頭的連結 (如 //mega.nz/...)
+            cleaned_text = re.sub(r'//[a-zA-Z0-9][^\s]*', '', cleaned_text)
+            # 移除常見檔案空間域名的連結
+            cleaned_text = re.sub(r'\b(?:mega\.nz|gofile\.io|katfile\.com|rapidgator\.net)[^\s]*', '', cleaned_text, flags=re.IGNORECASE)
+            cleaned_text = cleaned_text.strip()
+
+            if not cleaned_text:
+                continue
+
             # 移除開頭的標籤文字（如 Password：、密碼:）
             # 規則：如果開頭有 : 或 ：，則移除冒號及之前的所有文字
             for colon in ['：', ':']:
@@ -434,6 +446,15 @@ class LinkExtractor:
                 # 清理密碼
                 potential_pwd = line_stripped.strip()
 
+                # 移除 URL（密碼文字中可能混雜連結）
+                potential_pwd = re.sub(r'https?://[^\s]+', '', potential_pwd)
+                potential_pwd = re.sub(r'//[a-zA-Z0-9][^\s]*', '', potential_pwd)
+                potential_pwd = re.sub(r'\b(?:mega\.nz|gofile\.io|katfile\.com|rapidgator\.net)[^\s]*', '', potential_pwd, flags=re.IGNORECASE)
+                potential_pwd = potential_pwd.strip()
+
+                if not potential_pwd:
+                    continue
+
                 # 移除開頭的標籤文字（如 Password：、密碼:）
                 for colon in ['：', ':']:
                     if colon in potential_pwd:
@@ -539,6 +560,12 @@ class LinkExtractor:
 
         def clean_password(pwd: str) -> str:
             """清理密碼"""
+            pwd = pwd.strip()
+
+            # 移除 URL（密碼文字中可能混雜連結）
+            pwd = re.sub(r'https?://[^\s]+', '', pwd)
+            pwd = re.sub(r'//[a-zA-Z0-9][^\s]*', '', pwd)
+            pwd = re.sub(r'\b(?:mega\.nz|gofile\.io|katfile\.com|rapidgator\.net)[^\s]*', '', pwd, flags=re.IGNORECASE)
             pwd = pwd.strip()
 
             # 移除開頭的標籤文字（如 Password：、密碼:）

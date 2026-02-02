@@ -11,18 +11,51 @@ forum:
   - fid: '170'
     name: AV 西方交流區
   title_filters:
-  - MG@JD
-  - Transfer@HTTP
-  - Gofile@HTTP
-  - MEGA@IE
-  - MEGA@
-  - MEGA @
-  - MEGA @ 網頁下載
+  - '@mg'
+  - '@ mg'
+  - 'mg@'
+  - 'mg @'
+  - 'mega@'
+  - 'mega @'
+  - '@mega'
+  - '@ mega'
+  - 'gofile@'
+  - 'gofile @'
+  - '@gofile'
+  - '@ gofile'
+  - '@send'
+  - '@ send'
+  - 'send@'
+  - 'send @'
+  - 'mf@'
+  - 'mf @'
+  - '@mf'
+  - '@ mf'
+  web_download_keywords:
+  - '@gd'
+  - 'gd@'
+  - '@ gd'
+  - 'gd @'
+  - 'transfer@'
+  - '@transfer'
+  - 'transfer @'
+  - '@ transfer'
+  smg_keywords:
+  - '@smg'
+  - '@ smg'
+  - 'smg@'
+  - 'smg @'
 jdownloader:
   auto_start: true
   exe_path: C:\Users\Jimmy\Downloads\JDownloaderPortable\azofreeware.com\JDownloader2Portable.exe
   folderwatch_path: C:\Users\Jimmy\Downloads\JDownloaderPortable\azofreeware.com\App\JDownloader2\folderwatch
   method: folderwatch
+
+# SMG 下載器設定
+smg:
+  exe_path: ""              # SMG.exe 路徑
+  download_dir: ""          # SMG 下載目錄
+
 paths:
   download_dir: c:\dl\dl\
   extract_dir: c:\dl\rar\

@@ -194,13 +194,19 @@ class ProfileManager:
                     {"name": "AV 西方交流區", "fid": "170"}
                 ],
                 "title_filters": [
-                    "MG@JD",
-                    "Transfer@HTTP",
-                    "Gofile@HTTP",
-                    "MEGA@IE"
+                    "@mg", "@ mg", "mg@", "mg @",
+                    "mega@", "mega @", "@mega", "@ mega",
+                    "gofile@", "gofile @", "@gofile", "@ gofile",
+                    "@send", "@ send", "send@", "send @",
+                    "mf@", "mf @", "@mf", "@ mf"
                 ],
-                "web_download_keywords": [],
-                "smg_keywords": []
+                "web_download_keywords": [
+                    "@gd", "gd@", "@ gd", "gd @",
+                    "transfer@", "@transfer", "transfer @", "@ transfer"
+                ],
+                "smg_keywords": [
+                    "@smg", "@ smg", "smg@", "smg @"
+                ]
             },
             "auth": {
                 "cookie_file": str(self._get_cookie_path(path.stem))

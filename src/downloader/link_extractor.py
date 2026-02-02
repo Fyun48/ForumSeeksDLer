@@ -228,6 +228,8 @@ class LinkExtractor:
                     is_marker = any(marker in cleaned_text for marker in skip_markers)
 
                     if not is_marker:
+                        # 移除常見後綴
+                        cleaned_text = self._remove_password_suffix(cleaned_text)
                         logger.info(f"從 hideContent 提取密碼: {cleaned_text}")
                         return cleaned_text
 
@@ -239,10 +241,26 @@ class LinkExtractor:
                     is_marker = any(marker in cleaned_text for marker in skip_markers)
 
                     if not is_marker:
+                        # 移除常見後綴
+                        cleaned_text = self._remove_password_suffix(cleaned_text)
                         logger.info(f"從 hideContent 提取密碼 (@ 格式): {cleaned_text}")
                         return cleaned_text
 
         return None
+
+    def _remove_password_suffix(self, pwd: str) -> str:
+        """移除密碼常見後綴（如複製按鈕文字）"""
+        suffixes = [
+            '複製密碼', '複制密碼', '复制密码',
+            '複製代碼', '复制代码',
+            'Copy', 'copy',
+            '複製', '代碼',
+            '歡迎大家下載', '欢迎大家下载'
+        ]
+        for suffix in suffixes:
+            if pwd.endswith(suffix):
+                pwd = pwd[:-len(suffix)].strip()
+        return pwd.strip()
 
     def _extract_links(self, html: str) -> List[Dict]:
         """提取所有下載連結 - 優先從 <a href> 屬性提取"""
@@ -466,10 +484,8 @@ class LinkExtractor:
                 # 移除開頭的編號 (01. 02. 等)
                 potential_pwd = re.sub(r'^\d+\.\s*', '', potential_pwd)
 
-                # 移除常見後綴（包含「複製密碼」「複制密碼」）
-                for suffix in ['複製密碼', '複制密碼', '复制密码', '歡迎大家下載', '欢迎大家下载', '複製代碼', '复制代码']:
-                    if potential_pwd.endswith(suffix):
-                        potential_pwd = potential_pwd[:-len(suffix)].strip()
+                # 移除常見後綴（包含「複製密碼」「複製代碼」等）
+                potential_pwd = self._remove_password_suffix(potential_pwd)
 
                 # 檢查是否包含 _by_ 或常見密碼站點格式（整行就是密碼）
                 if '_by_' in potential_pwd or re.search(r'_(?:FastZone|FCBZONE|FDZone|OKFUN)\.', potential_pwd, re.IGNORECASE):
@@ -580,11 +596,8 @@ class LinkExtractor:
 
             # 移除常見的後綴文字
             pwd = pwd.rstrip('.,;:!?\'"')
-            # 移除中文後綴（包含「複製密碼」「複制密碼」）
-            suffixes = ['複製密碼', '複制密碼', '复制密码', '複製代碼', '复制代码', 'Copy', 'copy', '複製', '代碼', '歡迎大家下載', '欢迎大家下载']
-            for suffix in suffixes:
-                if pwd.endswith(suffix):
-                    pwd = pwd[:-len(suffix)].strip()
+            # 移除中文後綴（包含「複製密碼」「複製代碼」等）
+            pwd = self._remove_password_suffix(pwd)
             return pwd.strip()
 
         def add_password(pwd: str) -> bool:

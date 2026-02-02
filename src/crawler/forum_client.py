@@ -15,10 +15,11 @@ class ForumClient:
         if config_path is None:
             config_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
 
+        self.config_path = Path(config_path)
         with open(config_path, 'r', encoding='utf-8') as f:
             self.config = yaml.safe_load(f)
 
-        self.base_url = self.config['forum']['base_url']
+        self.base_url = self.config.get('forum', {}).get('base_url', 'https://fastzone.org')
         self.session = requests.Session()
         self._setup_session()
         self._load_cookies()
@@ -34,14 +35,20 @@ class ForumClient:
 
     def _load_cookies(self):
         """載入 cookies"""
-        cookie_file = Path(__file__).parent.parent.parent / self.config['auth']['cookie_file']
+        cookie_file_cfg = self.config.get('auth', {}).get('cookie_file', 'config/cookies.json')
+        cookie_path = Path(cookie_file_cfg)
+
+        # 如果是相對路徑，以 config 檔案所在目錄為基準
+        if not cookie_path.is_absolute():
+            cookie_path = self.config_path.parent / cookie_file_cfg
+
         try:
-            cookies = load_cookies_from_json(str(cookie_file))
+            cookies = load_cookies_from_json(str(cookie_path))
             apply_cookies_to_session(self.session, cookies)
-            logger.info(f"已載入 {len(cookies)} 個 cookies")
+            logger.info(f"已載入 {len(cookies)} 個 cookies，來源: {cookie_path}")
         except FileNotFoundError:
-            logger.warning(f"Cookie 檔案不存在: {cookie_file}")
-            logger.warning("請從瀏覽器匯出 cookies 到 config/cookies.json")
+            logger.warning(f"Cookie 檔案不存在: {cookie_path}")
+            logger.warning("請從瀏覽器匯出 cookies 或在設定中導入")
 
     def check_login(self) -> bool:
         """檢查是否已登入"""
@@ -60,7 +67,7 @@ class ForumClient:
     def get(self, url: str, **kwargs) -> Optional[requests.Response]:
         """GET 請求"""
         try:
-            delay = self.config['scraper']['delay_between_requests']
+            delay = self.config.get('scraper', {}).get('delay_between_requests', 2)
             time.sleep(delay)
             resp = self.session.get(url, timeout=30, **kwargs)
             resp.raise_for_status()

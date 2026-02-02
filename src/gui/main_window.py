@@ -1610,7 +1610,7 @@ class MainWindow(QMainWindow):
             return False
 
     def _import_cookie_from_browser(self):
-        """從瀏覽器自動導入 Cookie"""
+        """從瀏覽器自動導入 Cookie (使用 browser-cookie3)"""
         import json
 
         # 取得論壇域名
@@ -1619,25 +1619,49 @@ class MainWindow(QMainWindow):
 
         self.lbl_cookie_status.setText("Cookie 狀態: 正在讀取瀏覽器...")
         self.statusBar().showMessage("正在從瀏覽器讀取 Cookie...", 0)
+        QApplication.processEvents()
 
-        # 支援的瀏覽器及其 Cookie 路徑
-        browsers = self._get_browser_cookie_paths()
+        try:
+            import browser_cookie3
+        except ImportError:
+            QMessageBox.warning(
+                self, "缺少套件",
+                "需要安裝 browser-cookie3 套件。\n\n"
+                "請執行: pip install browser-cookie3"
+            )
+            return
 
         cookies_found = []
         browser_used = None
 
-        for browser_name, cookie_path in browsers.items():
-            if not cookie_path or not Path(cookie_path).exists():
-                continue
+        # 嘗試各種瀏覽器
+        browsers = [
+            ('Chrome', browser_cookie3.chrome),
+            ('Edge', browser_cookie3.edge),
+            ('Firefox', browser_cookie3.firefox),
+            ('Brave', browser_cookie3.brave),
+            ('Opera', browser_cookie3.opera),
+        ]
 
+        for browser_name, browser_func in browsers:
             try:
-                browser_cookies = self._read_browser_cookies(browser_name, cookie_path, domain)
-                if browser_cookies:
-                    cookies_found = browser_cookies
+                cj = browser_func(domain_name=domain)
+                for cookie in cj:
+                    cookies_found.append({
+                        'name': cookie.name,
+                        'value': cookie.value,
+                        'domain': cookie.domain,
+                        'path': cookie.path,
+                        'expirationDate': cookie.expires,
+                        'secure': cookie.secure,
+                        'httpOnly': cookie.has_nonstandard_attr('HttpOnly')
+                    })
+                if cookies_found:
                     browser_used = browser_name
                     break
             except Exception as e:
-                self._append_log(f"讀取 {browser_name} Cookie 失敗: {e}")
+                self._append_log(f"讀取 {browser_name} Cookie: {e}")
+                continue
 
         if cookies_found:
             # 轉換為 JSON 格式並顯示
@@ -1657,10 +1681,9 @@ class MainWindow(QMainWindow):
                 f"無法從瀏覽器自動讀取 {domain} 的 Cookie。\n\n"
                 "可能原因:\n"
                 "1. 瀏覽器未登入該論壇\n"
-                "2. 瀏覽器正在執行中 (Cookie 檔案被鎖定)\n"
-                "3. 瀏覽器版本不支援\n\n"
+                "2. 瀏覽器正在執行中 (需關閉瀏覽器)\n\n"
                 "建議:\n"
-                "- 關閉瀏覽器後再試\n"
+                "- 先關閉所有瀏覽器視窗後再試\n"
                 "- 或使用 EditThisCookie 等擴充功能手動導出"
             )
 

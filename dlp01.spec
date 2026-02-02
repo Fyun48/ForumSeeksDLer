@@ -53,6 +53,16 @@ a = Analysis(
         'plyer',
         'plyer.platforms',
         'plyer.platforms.win',
+        # browser-cookie3 相關
+        'browser_cookie3',
+        'lz4',
+        'lz4.frame',
+        'pycryptodomex',
+        'Cryptodome',
+        'Cryptodome.Cipher',
+        'Cryptodome.Cipher.AES',
+        'shadowcopy',
+        'wmi',
         # 專案模組
         'src',
         'src.version',

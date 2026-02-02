@@ -15,7 +15,7 @@ from ..utils.logger import logger
 class ForumStructureScraper:
     """論壇版區結構爬取器"""
 
-    def __init__(self, client: ForumClient, max_depth: int = 3):
+    def __init__(self, client: ForumClient, max_depth: int = 4):
         """
         初始化
 

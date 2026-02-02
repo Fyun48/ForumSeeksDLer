@@ -466,8 +466,8 @@ class LinkExtractor:
                 # 移除開頭的編號 (01. 02. 等)
                 potential_pwd = re.sub(r'^\d+\.\s*', '', potential_pwd)
 
-                # 移除常見後綴
-                for suffix in ['歡迎大家下載', '欢迎大家下载', '複製代碼', '复制代码']:
+                # 移除常見後綴（包含「複製密碼」「複制密碼」）
+                for suffix in ['複製密碼', '複制密碼', '复制密码', '歡迎大家下載', '欢迎大家下载', '複製代碼', '复制代码']:
                     if potential_pwd.endswith(suffix):
                         potential_pwd = potential_pwd[:-len(suffix)].strip()
 
@@ -580,8 +580,8 @@ class LinkExtractor:
 
             # 移除常見的後綴文字
             pwd = pwd.rstrip('.,;:!?\'"')
-            # 移除中文後綴
-            suffixes = ['複製代碼', '复制代码', 'Copy', 'copy', '複製', '代碼', '歡迎大家下載', '欢迎大家下载']
+            # 移除中文後綴（包含「複製密碼」「複制密碼」）
+            suffixes = ['複製密碼', '複制密碼', '复制密码', '複製代碼', '复制代码', 'Copy', 'copy', '複製', '代碼', '歡迎大家下載', '欢迎大家下载']
             for suffix in suffixes:
                 if pwd.endswith(suffix):
                     pwd = pwd[:-len(suffix)].strip()

@@ -7,7 +7,7 @@
 
 #define MyAppName "DLP01"
 #define MyAppDisplayName "DLP01 - 論壇自動下載程式"
-#define MyAppVersion "1.1.4"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "DLP01"
 #define MyAppURL ""
 #define MyAppExeName "DLP01.exe"

@@ -25,9 +25,18 @@ a = Analysis(
     pathex=[str(PROJECT_ROOT)],
     binaries=[],
     datas=[
-        # 設定檔目錄
-        ('config', 'config'),
-        # 資料目錄 (會在執行時建立，但先包含空目錄結構)
+        # 設定檔 - 排除所有 cookies 檔案（使用者需自行從瀏覽器匯入）
+        ('config/config.yaml', 'config'),
+        # profiles 目錄只包含結構檔，不包含 cookies 和使用者設定
+        ('config/profiles/profiles.json', 'config/profiles'),
+        #
+        # 注意：以下檔案不包含在發布版本中：
+        # - config/cookies.json（主要登入 cookies）
+        # - config/profiles/*_cookies.json（設定檔的 cookies）
+        # - config/profiles/*.yaml（使用者的設定檔）
+        # - config/profiles/search_history.json（搜尋歷史）
+        #
+        # 使用者首次使用需透過「設定 > Cookie 設定 > 從瀏覽器導入」匯入
     ],
     hiddenimports=[
         # PyQt6 相關

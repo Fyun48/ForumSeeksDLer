@@ -192,13 +192,34 @@ class LinkExtractor:
 
             logger.debug(f"hideContent 原始內容: {cleaned_text[:100]}...")
 
+            # === 優先提取: 如果有【解壓密碼】標記，直接提取其後的密碼 ===
+            # 格式: 【解壓密碼】密碼 或 【解壓密碼】 密碼
+            pw_label_match = re.search(r'【(?:解[壓压])?密[碼码]】[：:\s]*', cleaned_text)
+            if pw_label_match:
+                # 取得標記後的文字
+                after_label = cleaned_text[pw_label_match.end():].strip()
+                if after_label:
+                    # 提取第一個看起來像密碼的部分（不包含中文）
+                    # 密碼通常是連續的英數字加特殊符號
+                    pwd_match = re.match(r'([A-Za-z0-9@#$%^&*()_+=\-\.]+)', after_label)
+                    if pwd_match:
+                        potential_pwd = pwd_match.group(1)
+                        # 驗證是否為有效密碼（包含 _by_ 或長度適中）
+                        if '_by_' in potential_pwd or (8 <= len(potential_pwd) <= 80):
+                            potential_pwd = self._remove_password_suffix(potential_pwd)
+                            logger.info(f"從【解壓密碼】標記提取密碼: {potential_pwd}")
+                            return potential_pwd
+
             # 移除 URL（隱藏內容可能同時包含連結和密碼）
-            # 移除 http/https 連結
-            cleaned_text = re.sub(r'https?://[^\s]+', '', cleaned_text)
+            # 移除 http/https 連結 (包括 URL 編碼的路徑，直到遇到中文或空白)
+            # 改進: URL 可能緊跟中文字元，需要更準確地截斷
+            cleaned_text = re.sub(r'https?://[^\s\u4e00-\u9fff【】]*(?:\.(?:rar|zip|7z|exe|pdf|mp4|avi|mkv)/[^\s\u4e00-\u9fff【】]*)?', '', cleaned_text)
             # 移除 // 開頭的連結 (如 //mega.nz/...)
-            cleaned_text = re.sub(r'//[a-zA-Z0-9][^\s]*', '', cleaned_text)
+            cleaned_text = re.sub(r'//[a-zA-Z0-9][^\s\u4e00-\u9fff【】]*', '', cleaned_text)
             # 移除常見檔案空間域名的連結
-            cleaned_text = re.sub(r'\b(?:mega\.nz|gofile\.io|katfile\.com|rapidgator\.net)[^\s]*', '', cleaned_text, flags=re.IGNORECASE)
+            cleaned_text = re.sub(r'\b(?:mega\.nz|gofile\.io|katfile\.com|rapidgator\.net|mediafire\.com)[^\s\u4e00-\u9fff【】]*', '', cleaned_text, flags=re.IGNORECASE)
+            # 移除殘留的 URL 編碼片段 (以 % 開頭的編碼，如 %25E5...)
+            cleaned_text = re.sub(r'(?:%[0-9A-Fa-f]{2})+[^\s\u4e00-\u9fff【】]*', '', cleaned_text)
             cleaned_text = cleaned_text.strip()
 
             if not cleaned_text:
@@ -465,9 +486,11 @@ class LinkExtractor:
                 potential_pwd = line_stripped.strip()
 
                 # 移除 URL（密碼文字中可能混雜連結）
-                potential_pwd = re.sub(r'https?://[^\s]+', '', potential_pwd)
-                potential_pwd = re.sub(r'//[a-zA-Z0-9][^\s]*', '', potential_pwd)
-                potential_pwd = re.sub(r'\b(?:mega\.nz|gofile\.io|katfile\.com|rapidgator\.net)[^\s]*', '', potential_pwd, flags=re.IGNORECASE)
+                potential_pwd = re.sub(r'https?://[^\s\u4e00-\u9fff【】]+', '', potential_pwd)
+                potential_pwd = re.sub(r'//[a-zA-Z0-9][^\s\u4e00-\u9fff【】]*', '', potential_pwd)
+                potential_pwd = re.sub(r'\b(?:mega\.nz|gofile\.io|katfile\.com|rapidgator\.net|mediafire\.com)[^\s\u4e00-\u9fff【】]*', '', potential_pwd, flags=re.IGNORECASE)
+                # 移除 URL 編碼片段 (如 %25E5%25A6... 或 80%2599%25E5...)
+                potential_pwd = re.sub(r'(?:[0-9A-Fa-f]{2})?(?:%[0-9A-Fa-f]{2})+[^\s\u4e00-\u9fff【】]*', '', potential_pwd)
                 potential_pwd = potential_pwd.strip()
 
                 if not potential_pwd:
@@ -579,12 +602,16 @@ class LinkExtractor:
             pwd = pwd.strip()
 
             # 移除 URL（密碼文字中可能混雜連結）
-            pwd = re.sub(r'https?://[^\s]+', '', pwd)
-            pwd = re.sub(r'//[a-zA-Z0-9][^\s]*', '', pwd)
-            pwd = re.sub(r'\b(?:mega\.nz|gofile\.io|katfile\.com|rapidgator\.net)[^\s]*', '', pwd, flags=re.IGNORECASE)
+            pwd = re.sub(r'https?://[^\s\u4e00-\u9fff【】]+', '', pwd)
+            pwd = re.sub(r'//[a-zA-Z0-9][^\s\u4e00-\u9fff【】]*', '', pwd)
+            pwd = re.sub(r'\b(?:mega\.nz|gofile\.io|katfile\.com|rapidgator\.net|mediafire\.com)[^\s\u4e00-\u9fff【】]*', '', pwd, flags=re.IGNORECASE)
+            # 移除 URL 編碼片段 (如 %25E5%25A6... 或 80%2599%25E5...)
+            pwd = re.sub(r'(?:[0-9A-Fa-f]{2})?(?:%[0-9A-Fa-f]{2})+[^\s\u4e00-\u9fff【】]*', '', pwd)
             pwd = pwd.strip()
 
-            # 移除開頭的標籤文字（如 Password：、密碼:）
+            # 移除開頭的標籤文字（如 Password：、密碼:、【解壓密碼】）
+            # 先移除方括號標籤
+            pwd = re.sub(r'^【[^】]*】[：:\s]*', '', pwd)
             # 規則：如果開頭有 : 或 ：，則移除冒號及之前的所有文字
             for colon in ['：', ':']:
                 if colon in pwd:
@@ -607,6 +634,18 @@ class LinkExtractor:
                 passwords.append(pwd)
                 logger.debug(f"找到有效密碼: {pwd}")
             return len(passwords) >= MAX_PASSWORDS
+
+        # ===== 階段 0: 先處理【解壓密碼】標記格式 =====
+        # 格式: 【解壓密碼】密碼 或 【解壓密碼】 密碼
+        pw_label_matches = re.finditer(r'【(?:解[壓压])?密[碼码]】[：:\s]*([A-Za-z0-9@#$%^&*()_+=\-\.]+)', text)
+        for match in pw_label_matches:
+            pwd = match.group(1)
+            # 驗證密碼不是 URL 編碼的內容
+            if not pwd.startswith('%') and not re.match(r'^[0-9A-Fa-f%]+$', pwd):
+                if add_password(pwd):
+                    break
+        if len(passwords) >= MAX_PASSWORDS:
+            return '|'.join(passwords)
 
         # ===== 階段 1: 尋找 FastZone/_by_ 格式的密碼 (最可靠) =====
         for pattern in self.PASSWORD_PATTERNS:

@@ -91,13 +91,15 @@ class PostParser:
         # - [xxx@數字MB] 或 [xxx@數字GB] (有 B)
         # - [xxx@數字M] 或 [xxx@數字G] (沒有 B)
         # - @1.7G 或 @1.7GB (標題末尾)
-        # 例如: [MEGA@IE@163.4MB], [Gofile@HTTP@1.2GB], [MEGA@IE@1.7G]
+        # - [MEGA @ IE @ 3.23 GB] (有空格的格式)
+        # 例如: [MEGA@IE@163.4MB], [Gofile@HTTP@1.2GB], [MEGA@IE@1.7G], [MEGA @ IE @ 3.23 GB]
 
-        # 優先匹配方括號內的格式
-        match = re.search(r'\[.*?@([\d.]+)\s*(M|G|T)B?\s*\]', title, re.IGNORECASE)
+        # 優先匹配方括號內的格式 (允許 @ 前後有空格)
+        # 匹配方括號內最後出現的 數字+單位 格式
+        match = re.search(r'\[.*?([\d.]+)\s*(M|G|T)B?\s*\]', title, re.IGNORECASE)
         if not match:
-            # 嘗試匹配標題末尾的格式 (如 @1.7G)
-            match = re.search(r'@([\d.]+)\s*(M|G|T)B?\s*(?:\]|$)', title, re.IGNORECASE)
+            # 嘗試匹配標題末尾的格式 (如 @1.7G，允許 @ 後有空格)
+            match = re.search(r'@\s*([\d.]+)\s*(M|G|T)B?\s*(?:\]|$)', title, re.IGNORECASE)
 
         if match:
             size = float(match.group(1))

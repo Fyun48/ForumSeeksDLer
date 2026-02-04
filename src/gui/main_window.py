@@ -2213,6 +2213,9 @@ class MainWindow(QMainWindow):
             from ..database.db_manager import DatabaseManager
             db = DatabaseManager()
 
+            # 同步 JDownloader 實際下載檔名到資料庫
+            self._sync_jd_filenames_to_db(db)
+
             # 更新統計資訊
             stats = db.get_download_stats()
             self.lbl_total_posts.setText(f"總帖子: {stats.get('total_posts', 0)}")
@@ -2370,6 +2373,54 @@ class MainWindow(QMainWindow):
         result = list(merged.values())
         result.sort(key=lambda x: x.get('created_at', ''), reverse=True)
         return result
+
+    def _sync_jd_filenames_to_db(self, db):
+        """從 JDownloader 同步實際下載檔名到資料庫"""
+        try:
+            # 取得 JDownloader 路徑
+            jd_folder = self.config.get('jdownloader', {}).get('folderwatch_path', '')
+            if not jd_folder:
+                return
+
+            # 從 folderwatch 路徑推算 JD 根目錄
+            from pathlib import Path
+            jd_path = Path(jd_folder)
+            # folderwatch 通常在 JDownloader2/folderwatch 或 App/JDownloader2/folderwatch
+            while jd_path.name not in ('JDownloader2', 'JDownloader', '') and jd_path.parent != jd_path:
+                jd_path = jd_path.parent
+            if jd_path.name == '':
+                return
+
+            # 如果是 App/JDownloader2 結構，往上一層
+            if jd_path.parent.name == 'App':
+                jd_path = jd_path.parent.parent
+
+            from ..downloader.jd_history_reader import JDHistoryReader
+            reader = JDHistoryReader(str(jd_path))
+
+            # 讀取已完成的下載
+            completed = reader.get_completed_downloads()
+            if not completed:
+                return
+
+            updated_count = 0
+            for record in completed:
+                package_name = record.get('package_name', '')
+                file_name = record.get('file_name', '')
+
+                if package_name and file_name:
+                    # 嘗試更新資料庫
+                    count = db.update_jd_actual_filename(package_name, file_name)
+                    if count > 0:
+                        updated_count += count
+
+            if updated_count > 0:
+                from ..utils.logger import logger
+                logger.info(f"已從 JD 同步 {updated_count} 筆檔名記錄")
+
+        except Exception as e:
+            from ..utils.logger import logger
+            logger.debug(f"同步 JD 檔名時發生錯誤: {e}")
 
     def _on_history_cell_clicked(self, row: int, column: int):
         """處理歷史表格點擊 - 密碼複製、下載次數詳細"""

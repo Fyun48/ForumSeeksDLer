@@ -986,7 +986,40 @@ class DatabaseManager:
                 AND (jd_actual_filename IS NULL OR jd_actual_filename = '')
             ''', (actual_filename, now, f'%{package_name}%'))
 
-            return cursor.rowcount
+            if cursor.rowcount > 0:
+                return cursor.rowcount
+
+            # 階段 4: 忽略審查字元 (*) 進行匹配
+            # 論壇可能會在標題中加入 * 來審查某些字詞
+            # 例如: 資料庫有 "台*大學" 而 JD 記錄是 "台大學"
+            pkg_normalized = package_name.replace('*', '')
+            cursor.execute('''
+                SELECT id, jd_package_name
+                FROM downloads
+                WHERE jd_actual_filename IS NULL OR jd_actual_filename = ''
+            ''')
+            rows = cursor.fetchall()
+
+            matched_ids = []
+            for row in rows:
+                db_pkg = row[1] or ''
+                db_normalized = db_pkg.replace('*', '')
+                # 比對標準化後的字串
+                if db_normalized == pkg_normalized or pkg_normalized in db_normalized or db_normalized in pkg_normalized:
+                    matched_ids.append(row[0])
+
+            if matched_ids:
+                placeholders = ','.join('?' * len(matched_ids))
+                cursor.execute(f'''
+                    UPDATE downloads
+                    SET jd_actual_filename = ?,
+                        jd_complete_time = COALESCE(jd_complete_time, ?),
+                        download_status = 'completed'
+                    WHERE id IN ({placeholders})
+                ''', [actual_filename, now] + matched_ids)
+                return cursor.rowcount
+
+            return 0
 
     def update_archive_filename_if_empty(self, package_name: str, filename: str) -> int:
         """

@@ -270,22 +270,38 @@ class LinkExtractor:
 
         return None
 
-    def _remove_password_suffix(self, pwd: str) -> str:
-        """移除密碼常見後綴（如複製按鈕文字）並解碼 HTML 實體"""
+    def _remove_password_affixes(self, pwd: str) -> str:
+        """移除密碼常見前綴和後綴（如複製按鈕文字）並解碼 HTML 實體"""
         # 解碼 HTML 實體（如 &amp; -> &, &lt; -> <）
         pwd = html.unescape(pwd)
 
+        # 前綴列表（複製按鈕文字可能出現在密碼前面）
+        prefixes = [
+            '複製密碼', '複制密碼', '复制密码',
+            '複製代碼', '复制代码',
+            'Copy', 'copy',
+            '複製', '代碼', '代码',
+        ]
+        for prefix in prefixes:
+            if pwd.startswith(prefix):
+                pwd = pwd[len(prefix):].strip()
+
+        # 後綴列表
         suffixes = [
             '複製密碼', '複制密碼', '复制密码',
             '複製代碼', '复制代码',
             'Copy', 'copy',
-            '複製', '代碼',
+            '複製', '代碼', '代码',
             '歡迎大家下載', '欢迎大家下载'
         ]
         for suffix in suffixes:
             if pwd.endswith(suffix):
                 pwd = pwd[:-len(suffix)].strip()
         return pwd.strip()
+
+    def _remove_password_suffix(self, pwd: str) -> str:
+        """移除密碼常見前綴和後綴（向後相容的別名）"""
+        return self._remove_password_affixes(pwd)
 
     def _extract_links(self, html: str) -> List[Dict]:
         """提取所有下載連結 - 優先從 <a href> 屬性提取"""

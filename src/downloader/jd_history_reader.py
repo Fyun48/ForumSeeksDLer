@@ -236,7 +236,8 @@ class JDHistoryReader:
     def get_completed_downloads(self) -> List[Dict]:
         """取得所有已完成的下載"""
         history = self.read_download_history()
-        return [r for r in history if r.get('status') == 'FINISHED']
+        # 狀態可能是 FINISHED, FINISHED_MD5, FINISHED_SHA256, FINISHED_CRC 等
+        return [r for r in history if r.get('status', '').startswith('FINISHED')]
 
     def get_latest_linkgrabber_list(self) -> Optional[Path]:
         """取得最新的 linkgrabber/linkcollector zip 檔案"""

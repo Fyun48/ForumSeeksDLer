@@ -1,4 +1,5 @@
 import re
+import html
 from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
 
@@ -270,7 +271,10 @@ class LinkExtractor:
         return None
 
     def _remove_password_suffix(self, pwd: str) -> str:
-        """移除密碼常見後綴（如複製按鈕文字）"""
+        """移除密碼常見後綴（如複製按鈕文字）並解碼 HTML 實體"""
+        # 解碼 HTML 實體（如 &amp; -> &, &lt; -> <）
+        pwd = html.unescape(pwd)
+
         suffixes = [
             '複製密碼', '複制密碼', '复制密码',
             '複製代碼', '复制代码',

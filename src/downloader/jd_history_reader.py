@@ -58,9 +58,23 @@ class JDHistoryReader:
         download_lists.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         return download_lists[0]
 
-    def read_download_history(self) -> List[Dict]:
+    def get_all_download_lists(self) -> List[Path]:
+        """取得所有 downloadList.zip 檔案"""
+        if not self.cfg_path:
+            return []
+
+        download_lists = list(self.cfg_path.glob('downloadList*.zip'))
+        # 按修改時間排序，最新的在前
+        download_lists.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return download_lists
+
+    def read_download_history(self, read_all: bool = True) -> List[Dict]:
         """
         讀取下載記錄
+
+        Args:
+            read_all: 是否讀取所有 downloadList 檔案 (預設 True)
+                      設為 False 只讀取最新的檔案
 
         Returns:
             包含下載記錄的列表，每筆記錄包含:
@@ -70,67 +84,89 @@ class JDHistoryReader:
             - status: 下載狀態 (FINISHED, etc.)
             - crawljob_source: crawljob 來源檔案
         """
-        download_list = self.get_latest_download_list()
-        if not download_list:
+        if read_all:
+            download_lists = self.get_all_download_lists()
+        else:
+            latest = self.get_latest_download_list()
+            download_lists = [latest] if latest else []
+
+        if not download_lists:
             logger.warning("找不到 JDownloader downloadList")
             return []
 
         results = []
+        seen_urls = set()  # 避免重複記錄
 
-        try:
-            with zipfile.ZipFile(download_list, 'r') as zf:
-                # 取得所有檔案名稱
-                names = zf.namelist()
+        for download_list in download_lists:
+            try:
+                with zipfile.ZipFile(download_list, 'r') as zf:
+                    # 取得所有檔案名稱
+                    names = zf.namelist()
 
-                # 找出所有 package (不含底線的檔案)
-                packages = [n for n in names if '_' not in n and n != 'extraInfo']
+                    # 找出所有 package (不含底線的檔案)
+                    packages = [n for n in names if '_' not in n and n != 'extraInfo']
 
-                for pkg_name in packages:
-                    try:
-                        # 讀取 package 資訊
-                        pkg_data = json.loads(zf.read(pkg_name).decode('utf-8'))
-                        package_name = pkg_data.get('name', '')
-                        download_folder = pkg_data.get('downloadFolder', '')
+                    for pkg_name in packages:
+                        try:
+                            # 讀取 package 資訊
+                            pkg_data = json.loads(zf.read(pkg_name).decode('utf-8'))
+                            package_name = pkg_data.get('name', '')
+                            download_folder = pkg_data.get('downloadFolder', '')
 
-                        # 找出這個 package 的所有 links
-                        link_files = [n for n in names if n.startswith(f"{pkg_name}_")]
+                            # 找出這個 package 的所有 links
+                            link_files = [n for n in names if n.startswith(f"{pkg_name}_")]
 
-                        for link_file in link_files:
-                            try:
-                                link_data = json.loads(zf.read(link_file).decode('utf-8'))
+                            for link_file in link_files:
+                                try:
+                                    link_data = json.loads(zf.read(link_file).decode('utf-8'))
+                                    url = link_data.get('url', '')
 
-                                # 取得實際檔名 (優先使用 FINAL_FILENAME)
-                                properties = link_data.get('properties', {})
-                                file_name = properties.get('FINAL_FILENAME') or link_data.get('name', '')
+                                    # 避免重複記錄 (同一 URL 可能出現在多個 downloadList)
+                                    if url in seen_urls:
+                                        continue
+                                    seen_urls.add(url)
 
-                                # 取得 crawljob 來源
-                                url_origin = properties.get('URL_ORIGIN', '')
-                                crawljob_source = ''
-                                if url_origin:
-                                    # 解碼 URL
-                                    crawljob_source = unquote(url_origin)
-                                    # 提取檔名
-                                    if '/' in crawljob_source:
-                                        crawljob_source = crawljob_source.split('/')[-1]
+                                    # 取得實際檔名
+                                    properties = link_data.get('properties', {})
+                                    file_name = properties.get('FINAL_FILENAME') or link_data.get('name', '')
 
-                                results.append({
-                                    'package_name': package_name,
-                                    'file_name': file_name,
-                                    'download_folder': download_folder,
-                                    'status': link_data.get('finalLinkState', 'UNKNOWN'),
-                                    'crawljob_source': crawljob_source,
-                                    'url': link_data.get('url', ''),
-                                    'size': link_data.get('size', 0),
-                                })
+                                    # 對於 Gofile 等空間，從 directurl 提取正確檔名
+                                    # (因為 name/FINAL_FILENAME 可能有編碼問題)
+                                    direct_url = properties.get('directurl', '')
+                                    if direct_url and '/' in direct_url:
+                                        # 從 directurl 提取檔名並 URL 解碼
+                                        direct_filename = unquote(direct_url.split('/')[-1])
+                                        if direct_filename and direct_filename != file_name:
+                                            file_name = direct_filename
 
-                            except (json.JSONDecodeError, KeyError) as e:
-                                logger.debug(f"解析 link 失敗 {link_file}: {e}")
+                                    # 取得 crawljob 來源
+                                    url_origin = properties.get('URL_ORIGIN', '')
+                                    crawljob_source = ''
+                                    if url_origin:
+                                        # 解碼 URL
+                                        crawljob_source = unquote(url_origin)
+                                        # 提取檔名
+                                        if '/' in crawljob_source:
+                                            crawljob_source = crawljob_source.split('/')[-1]
 
-                    except (json.JSONDecodeError, KeyError) as e:
-                        logger.debug(f"解析 package 失敗 {pkg_name}: {e}")
+                                    results.append({
+                                        'package_name': package_name,
+                                        'file_name': file_name,
+                                        'download_folder': download_folder,
+                                        'status': link_data.get('finalLinkState', 'UNKNOWN'),
+                                        'crawljob_source': crawljob_source,
+                                        'url': url,
+                                        'size': link_data.get('size', 0),
+                                    })
 
-        except Exception as e:
-            logger.error(f"讀取 downloadList 失敗: {e}")
+                                except (json.JSONDecodeError, KeyError) as e:
+                                    logger.debug(f"解析 link 失敗 {link_file}: {e}")
+
+                        except (json.JSONDecodeError, KeyError) as e:
+                            logger.debug(f"解析 package 失敗 {pkg_name}: {e}")
+
+            except Exception as e:
+                logger.debug(f"讀取 {download_list.name} 失敗: {e}")
 
         return results
 

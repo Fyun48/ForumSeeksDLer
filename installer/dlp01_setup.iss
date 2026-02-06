@@ -7,7 +7,7 @@
 
 #define MyAppName "DLP01"
 #define MyAppDisplayName "DLP01 - 論壇自動下載程式"
-#define MyAppVersion "1.3.4"
+#define MyAppVersion "1.3.6"
 #define MyAppPublisher "DLP01"
 #define MyAppURL ""
 #define MyAppExeName "DLP01.exe"
@@ -59,13 +59,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked; OnlyBelowVersion: 6.1; Check: not IsAdminInstallMode
 
 [Files]
-; 主程式檔案 (排除 config 目錄)
-Source: "..\dist\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "_internal\config,_internal\config\*"
-
-; config 目錄 - 只在檔案不存在時安裝 (保護使用者設定)
-Source: "..\dist\{#MyAppName}\_internal\config\*"; DestDir: "{app}\_internal\config"; Flags: onlyifdoesntexist recursesubdirs createallsubdirs
-
-; 注意: 設定檔使用 onlyifdoesntexist 避免覆蓋使用者設定
+; 主程式及所有檔案
+Source: "..\dist\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 ; 開始選單

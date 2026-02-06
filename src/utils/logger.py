@@ -3,11 +3,13 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from .paths import get_logs_dir
+
 
 def setup_logger(name: str = "dlp01", log_dir: str = None) -> logging.Logger:
     """設定並回傳 logger"""
     if log_dir is None:
-        log_dir = Path(__file__).parent.parent.parent / "data" / "logs"
+        log_dir = get_logs_dir()
 
     log_dir = Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)

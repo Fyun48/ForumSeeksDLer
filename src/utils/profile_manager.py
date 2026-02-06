@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import List, Dict, Optional
 from datetime import datetime
 
+from .paths import get_profiles_dir
+
 
 class ProfileManager:
     """設定檔管理器"""
@@ -18,7 +20,7 @@ class ProfileManager:
 
     def __init__(self, base_dir: str = None):
         if base_dir is None:
-            base_dir = Path(__file__).parent.parent.parent / "config" / "profiles"
+            base_dir = get_profiles_dir()
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
 

@@ -4,13 +4,15 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
+from ..utils.paths import get_db_path
+
 
 class DatabaseManager:
     """SQLite 資料庫管理器"""
 
     def __init__(self, db_path: str = None):
         if db_path is None:
-            db_path = Path(__file__).parent.parent.parent / "data" / "dlp.db"
+            db_path = get_db_path()
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()

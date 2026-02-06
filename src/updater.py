@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 
 from .version import VERSION, GITHUB_OWNER, GITHUB_REPO, is_newer_version
 from .utils.logger import logger
+from .utils.paths import get_data_dir
 
 
 class UpdateChecker:
@@ -37,11 +38,8 @@ class UpdateChecker:
         """
         self.owner = owner or GITHUB_OWNER
         self.repo = repo or GITHUB_REPO
-        self._cache_dir = Path(__file__).parent.parent / "data"
+        self._cache_dir = get_data_dir()
         self._cache_path = self._cache_dir / self.CACHE_FILE
-
-        # 確保快取目錄存在
-        self._cache_dir.mkdir(parents=True, exist_ok=True)
 
     def is_configured(self) -> bool:
         """檢查是否已設定 GitHub 資訊"""

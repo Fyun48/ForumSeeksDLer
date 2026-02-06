@@ -6,6 +6,8 @@ import yaml
 
 from ..utils.cookie_loader import load_cookies_from_json, apply_cookies_to_session
 from ..utils.logger import logger
+from ..utils.paths import get_config_dir
+from ..utils.profile_manager import ProfileManager
 
 
 class ForumClient:
@@ -13,7 +15,9 @@ class ForumClient:
 
     def __init__(self, config_path: str = None):
         if config_path is None:
-            config_path = Path(__file__).parent.parent.parent / "config" / "config.yaml"
+            # 使用 profile manager 取得目前設定檔路徑
+            profile_mgr = ProfileManager()
+            config_path = profile_mgr.get_profile_config_path()
 
         self.config_path = Path(config_path)
         with open(config_path, 'r', encoding='utf-8') as f:

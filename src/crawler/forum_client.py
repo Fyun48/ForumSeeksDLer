@@ -39,12 +39,9 @@ class ForumClient:
 
     def _load_cookies(self):
         """載入 cookies"""
-        cookie_file_cfg = self.config.get('auth', {}).get('cookie_file', 'config/cookies.json')
-        cookie_path = Path(cookie_file_cfg)
-
-        # 如果是相對路徑，以 config 檔案所在目錄為基準
-        if not cookie_path.is_absolute():
-            cookie_path = self.config_path.parent / cookie_file_cfg
+        # 使用 profile_manager 取得正確的 cookie 路徑
+        profile_mgr = ProfileManager()
+        cookie_path = profile_mgr.get_profile_cookie_path()
 
         try:
             cookies = load_cookies_from_json(str(cookie_path))

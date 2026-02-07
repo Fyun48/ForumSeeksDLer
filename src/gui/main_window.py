@@ -948,8 +948,7 @@ class MainWindow(QMainWindow):
 
     def _get_cookie_path(self) -> Path:
         """取得 Cookie 檔案路徑"""
-        cookie_file = self.config.get('auth', {}).get('cookie_file', 'config/cookies.json')
-        return self.config_path.parent / cookie_file
+        return self.profile_manager.get_profile_cookie_path()
 
     def _load_cookie_file(self):
         """載入現有的 Cookie 檔案"""

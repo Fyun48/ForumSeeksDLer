@@ -196,18 +196,13 @@ class ProfileManager:
                     {"name": "AV 西方交流區", "fid": "170"}
                 ],
                 "title_filters": [
-                    "@mg", "@ mg", "mg@", "mg @",
-                    "mega@", "mega @", "@mega", "@ mega",
-                    "gofile@", "gofile @", "@gofile", "@ gofile",
-                    "@send", "@ send", "send@", "send @",
-                    "mf@", "mf @", "@mf", "@ mf"
+                    "mg", "mega", "gofile", "send", "mf"
                 ],
                 "web_download_keywords": [
-                    "@gd", "gd@", "@ gd", "gd @",
-                    "transfer@", "@transfer", "transfer @", "@ transfer"
+                    "gd", "transfer"
                 ],
                 "smg_keywords": [
-                    "@smg", "@ smg", "smg@", "smg @"
+                    "smg"
                 ]
             },
             "auth": {

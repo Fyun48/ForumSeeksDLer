@@ -29,6 +29,7 @@ from .section_search_manager_widget import SectionSearchManagerWidget
 from .search_download_worker import SearchDownloadWorker
 from .web_download_widget import WebDownloadWidget
 from .workers import CrawlerWorker, ExtractWorker
+from .tag_widget import TagWidget
 from .styles import HINT_LABEL, DANGER_BUTTON, NordColors
 
 
@@ -169,7 +170,10 @@ class MainWindow(QMainWindow):
         # 分頁 4: 版區群組 (原有的群組管理)
         self.tabs.addTab(self._create_sections_tab(), "版區群組")
 
-        # 分頁 5: 下載歷史
+        # 分頁 5: 下載關鍵字
+        self.tabs.addTab(self._create_keywords_tab(), "下載關鍵字")
+
+        # 分頁 6: 下載歷史
         self.tabs.addTab(self._create_history_tab(), "下載歷史")
 
         # 分頁 6: 網頁下載
@@ -569,37 +573,64 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(sections_group)
 
-        # 關鍵字篩選 (篩選 + 排除 並排)
-        keywords_layout = QHBoxLayout()
-
-        # 左側：標題篩選關鍵字
-        filters_group = QGroupBox("標題篩選關鍵字")
-        filters_layout = QVBoxLayout(filters_group)
-
-        self.list_filters = QListWidget()
-        filters_layout.addWidget(self.list_filters)
-
-        filter_btn_layout = QHBoxLayout()
-
-        btn_add_filter = QPushButton("新增")
-        btn_add_filter.clicked.connect(self._add_filter)
-        filter_btn_layout.addWidget(btn_add_filter)
-
-        btn_remove_filter = QPushButton("移除")
-        btn_remove_filter.clicked.connect(self._remove_filter)
-        filter_btn_layout.addWidget(btn_remove_filter)
-
-        filters_layout.addLayout(filter_btn_layout)
-        keywords_layout.addWidget(filters_group)
-
-        layout.addLayout(keywords_layout)
-
         # 儲存按鈕
         btn_save = QPushButton("儲存設定")
         btn_save.clicked.connect(self._save_sections_settings)
-        layout.addWidget(btn_save)
 
         return tab
+
+    def _create_keywords_tab(self) -> QWidget:
+        """建立下載關鍵字分頁"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        # 說明
+        hint = QLabel("輸入基礎關鍵字，系統自動產生 @xxx, @ xxx, xxx@, xxx @ 四種比對規則")
+        hint.setStyleSheet(HINT_LABEL)
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        # 標題篩選關鍵字 (JDownloader 下載)
+        filters_group = QGroupBox("標題篩選關鍵字 (JDownloader 下載)")
+        filters_layout = QVBoxLayout(filters_group)
+        self.tag_title_filters = TagWidget("輸入關鍵字，例如: mega")
+        filters_layout.addWidget(self.tag_title_filters)
+        layout.addWidget(filters_group)
+
+        # 手動網頁下載篩選關鍵字
+        web_group = QGroupBox("手動網頁下載篩選關鍵字")
+        web_layout = QVBoxLayout(web_group)
+        self.tag_web_keywords = TagWidget("輸入關鍵字，例如: gd")
+        web_layout.addWidget(self.tag_web_keywords)
+        layout.addWidget(web_group)
+
+        # SMG 篩選關鍵字
+        smg_group = QGroupBox("SMG 篩選關鍵字")
+        smg_layout = QVBoxLayout(smg_group)
+        self.tag_smg_keywords = TagWidget("輸入關鍵字，例如: smg")
+        smg_layout.addWidget(self.tag_smg_keywords)
+        layout.addWidget(smg_group)
+
+        # 儲存按鈕
+        btn_save = QPushButton("儲存設定")
+        btn_save.clicked.connect(self._save_keywords_settings)
+        layout.addWidget(btn_save)
+
+        layout.addStretch()
+
+        return tab
+
+    def _save_keywords_settings(self):
+        """儲存下載關鍵字設定"""
+        if 'forum' not in self.config:
+            self.config['forum'] = {}
+
+        self.config['forum']['title_filters'] = self.tag_title_filters.get_tags()
+        self.config['forum']['web_download_keywords'] = self.tag_web_keywords.get_tags()
+        self.config['forum']['smg_keywords'] = self.tag_smg_keywords.get_tags()
+
+        self._save_config()
+        self.statusBar().showMessage("下載關鍵字已儲存", 3000)
 
     def _create_history_tab(self) -> QWidget:
         """建立下載歷史分頁"""
@@ -612,17 +643,9 @@ class MainWindow(QMainWindow):
 
         self.lbl_total_posts = QLabel("總帖子: 0")
         self.lbl_total_downloads = QLabel("總下載: 0")
-        self.lbl_sent_to_jd = QLabel("已送JD: 0")
-        self.lbl_extract_success = QLabel("解壓成功: 0")
-        self.lbl_extract_failed = QLabel("解壓失敗: 0")
-        self.lbl_pending_extract = QLabel("待解壓: 0")
 
         stats_layout.addWidget(self.lbl_total_posts, 0, 0)
         stats_layout.addWidget(self.lbl_total_downloads, 0, 1)
-        stats_layout.addWidget(self.lbl_sent_to_jd, 0, 2)
-        stats_layout.addWidget(self.lbl_extract_success, 1, 0)
-        stats_layout.addWidget(self.lbl_extract_failed, 1, 1)
-        stats_layout.addWidget(self.lbl_pending_extract, 1, 2)
 
         layout.addWidget(stats_group)
 
@@ -640,11 +663,14 @@ class MainWindow(QMainWindow):
         self.history_search.setMaximumWidth(250)
         filter_layout.addWidget(self.history_search)
 
-        filter_layout.addWidget(QLabel("狀態:"))
-        self.history_status_filter = QComboBox()
-        self.history_status_filter.addItems(["全部", "成功", "失敗", "未解壓"])
-        self.history_status_filter.currentTextChanged.connect(self._on_history_filter_changed)
-        filter_layout.addWidget(self.history_status_filter)
+        filter_layout.addSpacing(10)
+        btn_refresh = QPushButton("重新整理")
+        btn_refresh.clicked.connect(self._refresh_history)
+        filter_layout.addWidget(btn_refresh)
+
+        btn_clear_history = QPushButton("清空")
+        btn_clear_history.clicked.connect(self._clear_download_history)
+        filter_layout.addWidget(btn_clear_history)
 
         filter_layout.addStretch()
 
@@ -656,9 +682,9 @@ class MainWindow(QMainWindow):
         history_layout.addLayout(filter_layout)
 
         self.history_table = QTableWidget()
-        self.history_table.setColumnCount(10)
+        self.history_table.setColumnCount(8)
         self.history_table.setHorizontalHeaderLabels([
-            "TID", "標題", "下載次數", "類型", "壓縮檔名", "密碼", "送JD時間", "解壓狀態", "版區", "建立時間"
+            "TID", "標題", "下載次數", "類型", "壓縮檔名", "密碼", "版區", "建立時間"
         ])
 
         # 設定欄寬 - 允許使用者調整
@@ -671,10 +697,8 @@ class MainWindow(QMainWindow):
         self.history_table.setColumnWidth(3, 80)   # 類型
         self.history_table.setColumnWidth(4, 150)  # 壓縮檔名
         self.history_table.setColumnWidth(5, 200)  # 密碼
-        self.history_table.setColumnWidth(6, 120)  # 送JD時間
-        self.history_table.setColumnWidth(7, 60)   # 解壓狀態
-        self.history_table.setColumnWidth(8, 100)  # 版區
-        self.history_table.setColumnWidth(9, 120)  # 建立時間
+        self.history_table.setColumnWidth(6, 100)  # 版區
+        self.history_table.setColumnWidth(7, 120)  # 建立時間
 
         self.history_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.history_table.setAlternatingRowColors(True)
@@ -690,17 +714,6 @@ class MainWindow(QMainWindow):
         self.history_table.customContextMenuRequested.connect(self._on_history_context_menu)
 
         history_layout.addWidget(self.history_table)
-
-        # 按鈕列
-        btn_layout = QHBoxLayout()
-
-        btn_refresh = QPushButton("重新整理")
-        btn_refresh.clicked.connect(self._refresh_history)
-        btn_layout.addWidget(btn_refresh)
-
-        btn_layout.addStretch()
-
-        history_layout.addLayout(btn_layout)
 
         layout.addWidget(history_group)
 
@@ -798,26 +811,6 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(extract_group)
 
-        # 特殊下載關鍵字設定
-        keyword_group = QGroupBox("特殊下載關鍵字")
-        keyword_layout = QGridLayout(keyword_group)
-
-        # 網頁下載關鍵字
-        keyword_layout.addWidget(QLabel("網頁下載關鍵字:"), 0, 0)
-        self.txt_web_download_keywords = QLineEdit()
-        self.txt_web_download_keywords.setPlaceholderText("用逗號分隔，例如: @gd, @mega")
-        self.txt_web_download_keywords.setToolTip("符合這些關鍵字的帖子會記錄到「網頁下載」分頁，不會發送到 JDownloader")
-        keyword_layout.addWidget(self.txt_web_download_keywords, 0, 1)
-
-        # SMG 關鍵字
-        keyword_layout.addWidget(QLabel("SMG 關鍵字:"), 1, 0)
-        self.txt_smg_keywords = QLineEdit()
-        self.txt_smg_keywords.setPlaceholderText("用逗號分隔，例如: @smg")
-        self.txt_smg_keywords.setToolTip("符合這些關鍵字的帖子會發送到 SMG 下載器")
-        keyword_layout.addWidget(self.txt_smg_keywords, 1, 1)
-
-        layout.addWidget(keyword_group)
-
         # 資料庫管理設定
         db_group = QGroupBox("資料庫管理")
         db_layout = QGridLayout(db_group)
@@ -875,20 +868,14 @@ class MainWindow(QMainWindow):
         self.txt_smg_exe.setText(smg.get('exe_path', ''))
         self.txt_smg_download_dir.setText(smg.get('download_dir', ''))
 
-        # 特殊下載關鍵字
-        forum = self.config.get('forum', {})
-        web_keywords = forum.get('web_download_keywords', [])
-        smg_keywords = forum.get('smg_keywords', [])
-        self.txt_web_download_keywords.setText(', '.join(web_keywords))
-        self.txt_smg_keywords.setText(', '.join(smg_keywords))
-
         # 版區設定 (群組化)
         self._load_sections_to_tree()
 
-        # 關鍵字篩選
-        self.list_filters.clear()
-        for f in self.config.get('forum', {}).get('title_filters', []):
-            self.list_filters.addItem(f)
+        # 關鍵字篩選 — 載入並自動遷移舊格式
+        forum = self.config.get('forum', {})
+        self.tag_title_filters.set_tags(self._migrate_keywords(forum.get('title_filters', [])))
+        self.tag_web_keywords.set_tags(self._migrate_keywords(forum.get('web_download_keywords', [])))
+        self.tag_smg_keywords.set_tags(self._migrate_keywords(forum.get('smg_keywords', [])))
 
         # 爬蟲設定
         scraper = self.config.get('scraper', {})
@@ -1083,12 +1070,6 @@ class MainWindow(QMainWindow):
         active_sections = self._get_active_sections()
         self.config['forum']['target_sections'] = active_sections
 
-        # 儲存關鍵字篩選
-        filters = []
-        for i in range(self.list_filters.count()):
-            filters.append(self.list_filters.item(i).text())
-        self.config['forum']['title_filters'] = filters
-
         self._save_config()
         self.statusBar().showMessage("版區設定已儲存", 3000)
 
@@ -1112,22 +1093,6 @@ class MainWindow(QMainWindow):
         if 'database' not in self.config:
             self.config['database'] = {}
         self.config['database']['retention_days'] = self.spin_retention_days.value()
-
-        # 特殊下載關鍵字
-        if 'forum' not in self.config:
-            self.config['forum'] = {}
-
-        # 解析關鍵字 (用逗號分隔)
-        web_keywords_text = self.txt_web_download_keywords.text().strip()
-        smg_keywords_text = self.txt_smg_keywords.text().strip()
-
-        self.config['forum']['web_download_keywords'] = [
-            k.strip() for k in web_keywords_text.split(',') if k.strip()
-        ] if web_keywords_text else []
-
-        self.config['forum']['smg_keywords'] = [
-            k.strip() for k in smg_keywords_text.split(',') if k.strip()
-        ] if smg_keywords_text else []
 
         self._save_config()
 
@@ -1547,26 +1512,47 @@ class MainWindow(QMainWindow):
 
         return active_sections
 
-    def _add_filter(self):
-        """新增關鍵字"""
-        from PyQt6.QtWidgets import QInputDialog
-        keyword, ok = QInputDialog.getText(self, "新增關鍵字", "關鍵字:")
-        if ok and keyword:
-            self.list_filters.addItem(keyword)
-            if 'forum' not in self.config:
-                self.config['forum'] = {}
-            if 'title_filters' not in self.config['forum']:
-                self.config['forum']['title_filters'] = []
-            self.config['forum']['title_filters'].append(keyword)
+    @staticmethod
+    def _migrate_keywords(keywords: list) -> list:
+        """將舊格式關鍵字遷移為基礎關鍵字
 
-    def _remove_filter(self):
-        """移除關鍵字"""
-        current_row = self.list_filters.currentRow()
-        if current_row >= 0:
-            self.list_filters.takeItem(current_row)
-            if 'forum' in self.config and 'title_filters' in self.config['forum']:
-                if current_row < len(self.config['forum']['title_filters']):
-                    self.config['forum']['title_filters'].pop(current_row)
+        舊格式: ['@mg', '@ mg', 'mg@', 'mg @']
+        新格式: ['mg']
+
+        @ 在中間的關鍵字（如 MG@JD）會被丟棄
+        """
+        if not keywords:
+            return []
+
+        # 檢查是否有包含 @ 的關鍵字（舊格式）
+        has_at = any('@' in kw for kw in keywords)
+        if not has_at:
+            # 已是新格式
+            return keywords
+
+        # 反推基礎關鍵字 — 只處理 @ 在開頭或結尾的
+        base_keywords = []
+        for kw in keywords:
+            stripped = kw.strip()
+            if not stripped:
+                continue
+
+            if '@' not in stripped:
+                # 沒有 @ 的直接保留
+                base = stripped.lower()
+            elif stripped.startswith('@') or stripped.startswith('@ '):
+                # @ 在開頭: @mg, @ mg
+                base = stripped.lstrip('@ ').strip().lower()
+            elif stripped.endswith('@') or stripped.endswith(' @'):
+                # @ 在結尾: mg@, mg @
+                base = stripped.rstrip('@ ').strip().lower()
+            else:
+                # @ 在中間 (如 MG@JD) — 丟棄
+                continue
+
+            if base and base not in base_keywords:
+                base_keywords.append(base)
+        return base_keywords
 
     def _is_jdownloader_running(self) -> bool:
         """檢查 JDownloader 是否正在執行"""
@@ -2219,10 +2205,6 @@ class MainWindow(QMainWindow):
             stats = db.get_download_stats()
             self.lbl_total_posts.setText(f"總帖子: {stats.get('total_posts', 0)}")
             self.lbl_total_downloads.setText(f"總下載: {stats.get('total_downloads', 0)}")
-            self.lbl_sent_to_jd.setText(f"已送JD: {stats.get('sent_to_jd', 0)}")
-            self.lbl_extract_success.setText(f"解壓成功: {stats.get('extract_success', 0)}")
-            self.lbl_extract_failed.setText(f"解壓失敗: {stats.get('extract_failed', 0)}")
-            self.lbl_pending_extract.setText(f"待解壓: {stats.get('pending_extract', 0)}")
 
             # 更新歷史記錄表格 - 按 tid 合併記錄
             history = db.get_download_history(limit=500)
@@ -2278,30 +2260,14 @@ class MainWindow(QMainWindow):
                     password_item.setForeground(QColor(*NordColors.AURORA_RED))
                 self.history_table.setItem(row, 5, password_item)
 
-                # 送JD時間
-                sent_time = record.get('sent_to_jd_at', '')
-                if sent_time:
-                    sent_time = sent_time[:16].replace('T', ' ')
-                self.history_table.setItem(row, 6, QTableWidgetItem(sent_time))
-
-                # 解壓狀態
-                extract_success = record.get('extract_success')
-                if extract_success is None:
-                    status = "未解壓"
-                elif extract_success:
-                    status = "成功"
-                else:
-                    status = "失敗"
-                self.history_table.setItem(row, 7, QTableWidgetItem(status))
-
                 # 版區
-                self.history_table.setItem(row, 8, QTableWidgetItem(record.get('forum_section', '')))
+                self.history_table.setItem(row, 6, QTableWidgetItem(record.get('forum_section', '')))
 
                 # 建立時間
                 created = record.get('created_at', '')
                 if created:
                     created = created[:16].replace('T', ' ')
-                self.history_table.setItem(row, 9, QTableWidgetItem(created))
+                self.history_table.setItem(row, 7, QTableWidgetItem(created))
 
             # 恢復 UI 更新
             self.history_table.setUpdatesEnabled(True)
@@ -2310,6 +2276,32 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             QMessageBox.warning(self, "錯誤", f"載入歷史記錄失敗: {e}")
+
+    def _clear_download_history(self):
+        """清空下載歷史"""
+        if self.history_table.rowCount() == 0:
+            QMessageBox.information(self, "提示", "沒有記錄可清空")
+            return
+
+        reply = QMessageBox.question(
+            self, "確認",
+            "確定要清空所有下載歷史記錄嗎？\n此操作無法復原。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                from ..database.db_manager import DatabaseManager
+                db = DatabaseManager()
+                with db.get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('DELETE FROM downloads')
+                    cursor.execute('DELETE FROM posts')
+                self._refresh_history()
+                self.statusBar().showMessage("已清空下載歷史", 3000)
+            except Exception as e:
+                QMessageBox.warning(self, "錯誤", f"清空失敗: {e}")
 
     def _merge_history_by_tid(self, history: list) -> list:
         """按 thread_id 合併下載歷史記錄"""
@@ -2479,26 +2471,19 @@ class MainWindow(QMainWindow):
         """搜尋文字變更"""
         self._apply_history_filter()
 
-    def _on_history_filter_changed(self, text: str):
-        """篩選條件變更"""
-        self._apply_history_filter()
-
     def _apply_history_filter(self):
         """套用歷史記錄篩選"""
         search_text = self.history_search.text().lower()
-        status_filter = self.history_status_filter.currentText()
 
         for row in range(self.history_table.rowCount()):
             # 取得各欄位資料
             title_item = self.history_table.item(row, 1)  # 標題
             password_item = self.history_table.item(row, 5)  # 密碼
-            section_item = self.history_table.item(row, 8)  # 版區
-            status_item = self.history_table.item(row, 7)  # 解壓狀態
+            section_item = self.history_table.item(row, 6)  # 版區
 
             title = title_item.text().lower() if title_item else ''
             password = password_item.text().lower() if password_item else ''
             section = section_item.text().lower() if section_item else ''
-            status = status_item.text() if status_item else ''
 
             # 搜尋條件
             match_search = (
@@ -2508,14 +2493,8 @@ class MainWindow(QMainWindow):
                 search_text in section
             )
 
-            # 狀態條件
-            match_status = (
-                status_filter == "全部" or
-                status == status_filter
-            )
-
             # 顯示或隱藏行
-            self.history_table.setRowHidden(row, not (match_search and match_status))
+            self.history_table.setRowHidden(row, not match_search)
 
     def _on_history_context_menu(self, pos):
         """顯示歷史記錄右鍵選單"""
@@ -2658,6 +2637,7 @@ class MainWindow(QMainWindow):
                 msg = f"已清除:\n" \
                       f"- 帖子: {result['deleted_posts']} 筆\n" \
                       f"- 下載記錄: {result['deleted_downloads']} 筆\n" \
+                      f"- 網頁下載: {result['deleted_web_downloads']} 筆\n" \
                       f"- 執行記錄: {result['deleted_runs']} 筆"
 
                 if result.get('deleted_thanked', 0) > 0:

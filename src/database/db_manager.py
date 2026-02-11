@@ -623,6 +623,7 @@ class DatabaseManager:
             deleted_posts = 0
             deleted_runs = 0
             deleted_thanked = 0
+            deleted_web_downloads = 0
 
             if retention_days > 0:
                 # 清除超過保留天數的記錄
@@ -650,6 +651,12 @@ class DatabaseManager:
                     DELETE FROM run_history WHERE started_at < ?
                 ''', (cutoff_date,))
                 deleted_runs = cursor.rowcount
+
+                # 清除超過保留天數的網頁下載記錄
+                cursor.execute('''
+                    DELETE FROM web_downloads WHERE created_at < ?
+                ''', (cutoff_date,))
+                deleted_web_downloads = cursor.rowcount
             else:
                 # 全部清除
                 cursor.execute('SELECT COUNT(*) FROM downloads')
@@ -661,9 +668,13 @@ class DatabaseManager:
                 cursor.execute('SELECT COUNT(*) FROM run_history')
                 deleted_runs = cursor.fetchone()[0]
 
+                cursor.execute('SELECT COUNT(*) FROM web_downloads')
+                deleted_web_downloads = cursor.fetchone()[0]
+
                 cursor.execute('DELETE FROM downloads')
                 cursor.execute('DELETE FROM posts')
                 cursor.execute('DELETE FROM run_history')
+                cursor.execute('DELETE FROM web_downloads')
 
             # 清除感謝記錄（如果指定了年數）
             if thanked_retention_years > 0:
@@ -677,7 +688,8 @@ class DatabaseManager:
                 'deleted_posts': deleted_posts,
                 'deleted_downloads': deleted_downloads,
                 'deleted_runs': deleted_runs,
-                'deleted_thanked': deleted_thanked
+                'deleted_thanked': deleted_thanked,
+                'deleted_web_downloads': deleted_web_downloads
             }
 
     # 保留舊函數名稱以向後相容
@@ -1380,13 +1392,13 @@ class DatabaseManager:
             ''', (thread_id, download_url))
             return cursor.fetchone() is not None
 
-    def mark_web_download_complete(self, thread_id: str, record_history: bool = True) -> int:
+    def mark_web_download_complete(self, thread_id: str, record_history: bool = False) -> int:
         """
         標記網頁下載為已完成
 
         Args:
             thread_id: 帖子 ID
-            record_history: 是否記錄到 download_history 表
+            record_history: 是否記錄到 download_history 表（預設不記錄）
 
         Returns:
             更新的記錄數量
@@ -1410,16 +1422,8 @@ class DatabaseManager:
                 SET downloaded_at = ?, archive_filename = ?
                 WHERE thread_id = ? AND downloaded_at IS NULL
             ''', (now, title, thread_id))
-            updated_count = cursor.rowcount
 
-            # 記錄到 download_history（用於追蹤下載次數）
-            if record_history and updated_count > 0 and title:
-                cursor.execute('''
-                    INSERT INTO download_history (tid, download_time, filename, post_id)
-                    VALUES (?, ?, ?, NULL)
-                ''', (thread_id, now, f'[網頁下載] {title}'))
-
-            return updated_count
+            return cursor.rowcount
 
     def get_web_download_by_thread(self, thread_id: str) -> List[Dict[str, Any]]:
         """根據 thread_id 取得網頁下載記錄"""

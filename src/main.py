@@ -28,6 +28,25 @@ from src.utils.paths import get_config_dir
 from src.utils.profile_manager import ProfileManager
 
 
+def expand_keywords(base_keywords: list) -> list:
+    """將基礎關鍵字展開為 4 種匹配變體
+
+    例如: ['mg'] -> ['@mg', '@ mg', 'mg@', 'mg @']
+    """
+    expanded = []
+    for kw in base_keywords:
+        kw = kw.strip()
+        if not kw:
+            continue
+        expanded.extend([
+            f'@{kw}',
+            f'@ {kw}',
+            f'{kw}@',
+            f'{kw} @',
+        ])
+    return expanded
+
+
 class DLP01:
     """主程式類別"""
 
@@ -43,16 +62,21 @@ class DLP01:
         # 初始化元件
         self.client = ForumClient(config_path)
 
-        # 關鍵字設定 (需要先讀取，供 PostParser 使用)
-        self.web_download_keywords = self.config['forum'].get('web_download_keywords', [])
-        self.smg_keywords = self.config['forum'].get('smg_keywords', [])
+        # 關鍵字設定 — 讀取基礎關鍵字並展開為匹配變體
+        base_title = self.config['forum'].get('title_filters', [])
+        base_web = self.config['forum'].get('web_download_keywords', [])
+        base_smg = self.config['forum'].get('smg_keywords', [])
+
+        self.web_download_keywords = expand_keywords(base_web)
+        self.smg_keywords = expand_keywords(base_smg)
+        title_filters = expand_keywords(base_title)
 
         # 合併額外關鍵字 (網頁下載 + SMG)
         extra_keywords = list(self.web_download_keywords) + list(self.smg_keywords)
 
         max_posts = self.config['scraper'].get('posts_per_section', 15)
         self.parser = PostParser(
-            self.config['forum']['title_filters'],
+            title_filters,
             max_posts=max_posts,
             extra_keywords=extra_keywords if extra_keywords else None
         )
@@ -97,8 +121,6 @@ class DLP01:
             'smg_downloads': 0
         }
 
-        # 大檔案清單 (超過限制需確認)
-        self.large_files = []
 
     def request_stop(self):
         """請求停止執行"""
@@ -258,8 +280,6 @@ class DLP01:
         file_size_mb = post.get('file_size_mb', 0)
         size_limit = getattr(self, 'size_limit_mb', 2048)
         if file_size_mb > size_limit:
-            # 超過大小限制，靜默跳過（不顯示日誌）
-            self.large_files.append(post)
             return
 
         if not is_redownload:
@@ -455,19 +475,6 @@ class DLP01:
         if self.stats['smg_downloads'] > 0:
             logger.info(f"SMG 下載: {self.stats['smg_downloads']}")
 
-        # 顯示大檔案清單
-        if self.large_files:
-            size_limit_gb = self.size_limit_mb / 1024
-            logger.info("")
-            logger.info("=" * 50)
-            logger.info(f"發現 {len(self.large_files)} 個大檔案 (>{size_limit_gb:.1f}GB) 需要確認:")
-            logger.info("=" * 50)
-            for i, post in enumerate(self.large_files, 1):
-                size_gb = post.get('file_size_mb', 0) / 1024
-                logger.info(f"{i}. [{size_gb:.1f}GB] {post['title'][:60]}...")
-                logger.info(f"   tid={post['thread_id']}")
-            logger.info("")
-            logger.info("如需下載大檔案，請在進階設定調高檔案大小限制，或執行: py src/main.py --no-size-limit")
 
 
 def main():

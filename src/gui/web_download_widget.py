@@ -27,8 +27,8 @@ class WebDownloadWidget(QWidget):
     # 訊號
     refresh_requested = pyqtSignal()
 
-    # 預設欄位寬度 [勾選, 標題, 關鍵字, 下載連結, 密碼, 狀態, 時間, 操作]
-    DEFAULT_COLUMN_WIDTHS = [30, 300, 80, 200, 150, 60, 80, 60]
+    # 預設欄位寬度 [勾選, 標題, 關鍵字, 下載連結, 密碼, 時間]
+    DEFAULT_COLUMN_WIDTHS = [30, 300, 80, 200, 150, 80]
 
     def __init__(self, config_path: str = None, parent=None):
         super().__init__(parent)
@@ -100,9 +100,9 @@ class WebDownloadWidget(QWidget):
 
         # 表格
         self.table = QTableWidget()
-        self.table.setColumnCount(8)
+        self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels([
-            "", "標題", "關鍵字", "下載連結", "密碼", "狀態", "時間", "操作"
+            "", "標題", "關鍵字", "下載連結", "密碼", "時間"
         ])
 
         # 設定欄位寬度 - 允許使用者拖曳調整
@@ -233,36 +233,14 @@ class WebDownloadWidget(QWidget):
                 password_item.setForeground(QColor(*NordColors.AURORA_RED))  # 紅色
             self.table.setItem(row, 4, password_item)
 
-            # 狀態 (column 5)
-            downloaded_at = record.get('downloaded_at')
-            if downloaded_at:
-                status_item = QTableWidgetItem("已下載")
-                status_item.setForeground(QColor(*NordColors.AURORA_GREEN))  # 綠色
-                try:
-                    dt = datetime.fromisoformat(downloaded_at)
-                    status_item.setToolTip(f"下載時間: {dt.strftime('%Y-%m-%d %H:%M')}")
-                except:
-                    status_item.setToolTip(f"下載時間: {downloaded_at}")
-            else:
-                status_item = QTableWidgetItem("未下載")
-                status_item.setForeground(QColor(*NordColors.POLAR_NIGHT_3))  # 灰色
-            self.table.setItem(row, 5, status_item)
-
-            # 時間 (column 6)
+            # 時間 (column 5)
             created_at = record.get('created_at', '')
             try:
                 dt = datetime.fromisoformat(created_at)
                 time_str = dt.strftime("%m-%d %H:%M")
             except:
                 time_str = created_at
-            self.table.setItem(row, 6, QTableWidgetItem(time_str))
-
-            # 操作按鈕 (column 7)
-            btn_open = QPushButton("開啟")
-            btn_open.setProperty("download_urls", download_urls)
-            btn_open.setProperty("thread_id", record.get('thread_id', ''))
-            btn_open.clicked.connect(self._on_open_link_clicked)
-            self.table.setCellWidget(row, 7, btn_open)
+            self.table.setItem(row, 5, QTableWidgetItem(time_str))
 
         # 恢復 UI 更新
         self.table.setUpdatesEnabled(True)
@@ -307,18 +285,6 @@ class WebDownloadWidget(QWidget):
                     if not post_url.startswith('http'):
                         post_url = f"https://fastzone.org/{post_url}"
                     webbrowser.open(post_url)
-
-    def _on_open_link_clicked(self):
-        """點擊開啟連結按鈕"""
-        btn = self.sender()
-        if btn:
-            urls = btn.property("download_urls")
-            if urls:
-                if isinstance(urls, list):
-                    for url in urls:
-                        webbrowser.open(url)
-                else:
-                    webbrowser.open(urls)
 
     def _on_context_menu(self, pos):
         """顯示右鍵選單"""
@@ -401,9 +367,9 @@ class WebDownloadWidget(QWidget):
         if not thread_id:
             return
 
-        count = self.db.mark_web_download_complete(thread_id, record_history=True)
+        count = self.db.mark_web_download_complete(thread_id, record_history=False)
         if count > 0:
-            logger.info(f"已標記 thread_id={thread_id} 為已下載，並記錄到下載歷史")
+            logger.info(f"已標記 thread_id={thread_id} 為已下載")
             QToolTip.showText(QCursor.pos(), "已標記為已下載", self.table, self.table.rect(), 1500)
             self.load_data()  # 刷新表格
         else:
@@ -512,7 +478,7 @@ class WebDownloadWidget(QWidget):
         # 批次標記
         marked_count = 0
         for tid in thread_ids:
-            count = self.db.mark_web_download_complete(tid, record_history=True)
+            count = self.db.mark_web_download_complete(tid, record_history=False)
             if count > 0:
                 marked_count += 1
 
@@ -520,7 +486,7 @@ class WebDownloadWidget(QWidget):
             logger.info(f"批次標記 {marked_count} 個項目為已下載")
             QMessageBox.information(
                 self, "完成",
-                f"已將 {marked_count} 個項目標記為已下載，\n並記錄到下載歷史。"
+                f"已將 {marked_count} 個項目標記為已下載。"
             )
             self.load_data()  # 刷新表格
 

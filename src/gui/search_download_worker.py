@@ -13,6 +13,7 @@ from ..downloader.link_extractor import LinkExtractor
 from ..downloader.jd_integration import JDownloaderIntegration
 from ..downloader.smg_integration import SMGIntegration, extract_smg_code
 from ..database.db_manager import DatabaseManager
+from ..main import expand_keywords
 from ..utils.logger import logger
 
 
@@ -59,9 +60,9 @@ class SearchDownloadWorker(QThread):
             )
             db = DatabaseManager()
 
-            # 網頁下載和 SMG 關鍵字
-            web_download_keywords = self.config.get('forum', {}).get('web_download_keywords', [])
-            smg_keywords = self.config.get('forum', {}).get('smg_keywords', [])
+            # 網頁下載和 SMG 關鍵字 — 展開基礎關鍵字
+            web_download_keywords = expand_keywords(self.config.get('forum', {}).get('web_download_keywords', []))
+            smg_keywords = expand_keywords(self.config.get('forum', {}).get('smg_keywords', []))
 
             # SMG 整合
             smg_config = self.config.get('smg', {})
